@@ -7,15 +7,17 @@
 *.dll
 *.so
 *.dylib
+/bin/
+/dist/
+/tui-db
 
-# Test binary, built with `go test -c`
+# Test binary, coverage, profiles, and other test artifacts
 *.test
-
-# Code coverage profiles and other test artifacts
 *.out
 coverage.*
 *.coverprofile
 profile.cov
+*.prof
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -30,3 +32,4 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+.DS_Store
