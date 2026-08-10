@@ -20,6 +20,8 @@ import (
 	"github.com/lucasfguimares/tui-db/internal/activity"
 	"github.com/lucasfguimares/tui-db/internal/database"
 	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/tui-db/internal/queryhistory"
+	"github.com/lucasfguimares/tui-db/internal/querylibrary"
 	"github.com/lucasfguimares/tui-db/internal/sqleditor"
 	"github.com/lucasfguimares/tui-db/internal/sqlscan"
 )
@@ -53,6 +55,13 @@ const (
 	modeCellDetail
 	modeResultSearch
 	modeGotoRow
+	modeHistory
+	modeHistorySearch
+	modeLibrary
+	modeLibrarySearch
+	modeFavoriteForm
+	modeSnippetForm
+	modeConfirmHistoryClear
 )
 
 type profileRepository interface {
@@ -62,25 +71,28 @@ type profileRepository interface {
 }
 
 type queryTab struct {
-	id          int
-	connection  profile.Connection
-	editor      textarea.Model
-	table       *resultTableModel
-	result      database.Result
-	isRunning   bool
-	isTrusted   bool
-	requestID   int
-	cancel      context.CancelFunc
-	statusText  string
-	selection   *int
-	startedAt   time.Time
-	lastSQL     string
-	lastSQLBase int
-	document    *sqleditor.Document
-	analysis    sqleditor.Analysis
-	diagnostic  int
-	format      sqleditor.FormatOptions
-	completion  autocompleteState
+	id                  int
+	connection          profile.Connection
+	editor              textarea.Model
+	table               *resultTableModel
+	result              database.Result
+	isRunning           bool
+	isTrusted           bool
+	requestID           int
+	cancel              context.CancelFunc
+	statusText          string
+	selection           *int
+	startedAt           time.Time
+	lastSQL             string
+	lastSQLBase         int
+	document            *sqleditor.Document
+	analysis            sqleditor.Analysis
+	diagnostic          int
+	format              sqleditor.FormatOptions
+	completion          autocompleteState
+	placeholders        []querylibrary.Placeholder
+	placeholderAwaiting bool
+	placeholderIndex    int
 }
 
 type passwordAction int
@@ -210,6 +222,25 @@ type logsLoadedMsg struct {
 	err     error
 }
 
+type historyLoadedMsg struct {
+	entries []queryhistory.Entry
+	err     error
+}
+
+type historyChangedMsg struct{ err error }
+type historyRecordedMsg struct {
+	tabID int
+	err   error
+}
+
+type libraryLoadedMsg struct {
+	favorites []querylibrary.Favorite
+	snippets  []querylibrary.Snippet
+	err       error
+}
+
+type libraryChangedMsg struct{ err error }
+
 // Model owns the entire interactive application state.
 type Model struct {
 	store     profileRepository
@@ -218,6 +249,8 @@ type Model struct {
 	inspector *database.Inspector
 	runner    *database.Runner
 	activity  *activity.Log
+	history   *queryhistory.Store
+	library   *querylibrary.Store
 
 	profiles      []profile.Connection
 	catalog       map[string]*catalogState
@@ -248,6 +281,21 @@ type Model struct {
 	cellDetailText        string
 	autocompleteCache     map[string]*autocompleteCatalogState
 	autocompleteRequestID uint64
+	historyEntries        []queryhistory.Entry
+	historyCursor         int
+	historyFilter         queryhistory.Filter
+	historyInput          textinput.Model
+	historyPeriod         int
+	historyError          string
+	libraryFavorites      []querylibrary.Favorite
+	librarySnippets       []querylibrary.Snippet
+	libraryCursor         int
+	librarySection        int
+	librarySearch         string
+	libraryError          string
+	libraryInput          textinput.Model
+	favoriteForm          favoriteForm
+	snippetForm           snippetForm
 }
 
 // New creates the root Bubble Tea model with explicitly wired services.
@@ -258,6 +306,8 @@ func New(
 	inspector *database.Inspector,
 	runner *database.Runner,
 	activityLog *activity.Log,
+	historyStore *queryhistory.Store,
+	libraryStore *querylibrary.Store,
 ) *Model {
 	passwordInput := textinput.New()
 	passwordInput.Prompt = "Password: "
@@ -265,6 +315,12 @@ func New(
 	passwordInput.SetWidth(42)
 	resultInput := textinput.New()
 	resultInput.SetWidth(42)
+	historyInput := textinput.New()
+	historyInput.Prompt = "Search SQL: "
+	historyInput.SetWidth(52)
+	libraryInput := textinput.New()
+	libraryInput.Prompt = "Search: "
+	libraryInput.SetWidth(52)
 
 	model := &Model{
 		store:             store,
@@ -273,6 +329,8 @@ func New(
 		inspector:         inspector,
 		runner:            runner,
 		activity:          activityLog,
+		history:           historyStore,
+		library:           libraryStore,
 		profiles:          []profile.Connection{},
 		catalog:           map[string]*catalogState{},
 		browserItems:      []browserItem{},
@@ -288,6 +346,9 @@ func New(
 		resultInput:       resultInput,
 		logs:              viewport.New(),
 		cellDetail:        viewport.New(),
+		historyInput:      historyInput,
+		libraryInput:      libraryInput,
+		librarySnippets:   querylibrary.BuiltInSnippets(),
 		autocompleteCache: map[string]*autocompleteCatalogState{},
 	}
 	return model
@@ -295,7 +356,7 @@ func New(
 
 // Init loads saved profiles without blocking the initial render.
 func (m *Model) Init() tea.Cmd {
-	return m.loadProfilesCmd()
+	return tea.Batch(m.loadProfilesCmd(), m.loadLibraryCmd())
 }
 
 // Update applies input and asynchronous service results.
@@ -373,8 +434,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case columnsLoadedMsg:
 		return m, m.handleColumns(msg)
 	case queryFinishedMsg:
-		m.handleQueryFinished(msg)
-		return m, nil
+		return m, m.handleQueryFinished(msg)
 	case queryTickMsg:
 		tab := m.tabByID(msg.tabID)
 		if tab == nil || !tab.isRunning || tab.requestID != msg.requestID {
@@ -410,6 +470,38 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case logsLoadedMsg:
 		m.renderLogs(msg)
 		return m, nil
+	case historyLoadedMsg:
+		m.applyHistory(msg)
+		return m, nil
+	case historyChangedMsg:
+		if msg.err != nil {
+			m.setError(msg.err)
+			return m, nil
+		}
+		return m, m.loadHistoryCmd()
+	case historyRecordedMsg:
+		if msg.err != nil {
+			if tab := m.tabByID(msg.tabID); tab != nil {
+				tab.statusText = "Saving query history failed: " + activity.Redact(msg.err.Error())
+			}
+		}
+		return m, nil
+	case libraryLoadedMsg:
+		m.applyLibrary(msg)
+		return m, nil
+	case libraryChangedMsg:
+		if msg.err != nil {
+			if m.mode == modeFavoriteForm {
+				m.favoriteForm.errorText = msg.err.Error()
+			} else if m.mode == modeSnippetForm {
+				m.snippetForm.errorText = msg.err.Error()
+			} else {
+				m.setError(msg.err)
+			}
+			return m, nil
+		}
+		m.mode = modeLibrary
+		return m, m.loadLibraryCmd()
 	case tea.KeyPressMsg:
 		return m, m.handleKey(msg)
 	}
@@ -442,7 +534,15 @@ func (m *Model) View() tea.View {
 			content = m.renderCellDetail()
 		case modeResultSearch, modeGotoRow:
 			content = m.renderResultPrompt()
-		case modeConfirmQuery, modeConfirmDelete, modeConfirmClose, modeConfirmQuit:
+		case modeHistory, modeHistorySearch:
+			content = m.renderHistoryScreen()
+		case modeLibrary, modeLibrarySearch:
+			content = m.renderLibraryScreen()
+		case modeFavoriteForm:
+			content = m.renderFavoriteForm()
+		case modeSnippetForm:
+			content = m.renderSnippetForm()
+		case modeConfirmQuery, modeConfirmDelete, modeConfirmClose, modeConfirmQuit, modeConfirmHistoryClear:
 			content = m.renderConfirmation()
 		default:
 			content = m.renderWorkspace()
@@ -463,6 +563,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		if cmd, handled := m.handleAutocompleteKey(msg); handled {
 			return cmd
 		}
+		if cmd, handled := m.handlePlaceholderKey(msg); handled {
+			return cmd
+		}
 	}
 
 	switch key {
@@ -478,6 +581,15 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+l":
 		m.mode = modeLogs
 		return m.loadLogsCmd()
+	case "ctrl+h":
+		return m.openHistory()
+	case "ctrl+shift+p":
+		return m.openLibrary()
+	case "ctrl+s":
+		if m.focus == focusEditor {
+			m.openFavoriteForm(querylibrary.Favorite{})
+		}
+		return nil
 	case "ctrl+b":
 		m.isBrowserOpen = !m.isBrowserOpen
 		if !m.isBrowserOpen && m.focus == focusBrowser {
@@ -585,6 +697,14 @@ func (m *Model) handleResultKey(msg tea.KeyPressMsg) tea.Cmd {
 func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	switch m.mode {
+	case modeHistory, modeHistorySearch:
+		return m.handleHistoryKey(msg)
+	case modeLibrary, modeLibrarySearch:
+		return m.handleLibraryKey(msg)
+	case modeFavoriteForm:
+		return m.handleFavoriteFormKey(msg)
+	case modeSnippetForm:
+		return m.handleSnippetFormKey(msg)
 	case modeLogs:
 		if key == "esc" || key == "ctrl+l" {
 			m.mode = modeWorkspace
@@ -730,6 +850,14 @@ func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		if key == "n" || key == "esc" {
 			m.mode = modeWorkspace
 		}
+	case modeConfirmHistoryClear:
+		if key == "y" {
+			m.mode = modeHistory
+			return m.clearHistoryCmd()
+		}
+		if key == "n" || key == "esc" {
+			m.mode = modeHistory
+		}
 	}
 	return nil
 }
@@ -811,6 +939,7 @@ func (m *Model) updateFocused(message tea.Msg) tea.Cmd {
 		tab.editor = updated
 		after := tab.editor.Value()
 		if before != after {
+			adjustPlaceholders(tab, beforeCursor, len(after)-len(before))
 			if tab.document == nil {
 				tab.document = sqleditor.NewDocument(before)
 			}
@@ -1118,10 +1247,16 @@ func scheduleSQLAnalysis(tabID int, version uint64) tea.Cmd {
 
 func dialectFor(driver profile.Driver) sqleditor.Dialect { return sqleditor.ByID(string(driver)) }
 
-func (m *Model) handleQueryFinished(msg queryFinishedMsg) {
+func (m *Model) handleQueryFinished(msg queryFinishedMsg) tea.Cmd {
 	tab := m.tabByID(msg.tabID)
 	if tab == nil || tab.requestID != msg.requestID {
-		return
+		return nil
+	}
+	if msg.result.Duration <= 0 && !tab.startedAt.IsZero() {
+		msg.result.Duration = time.Since(tab.startedAt)
+		if msg.result.Duration <= 0 {
+			msg.result.Duration = time.Nanosecond
+		}
 	}
 	tab.isRunning = false
 	if tab.cancel != nil {
@@ -1166,7 +1301,7 @@ func (m *Model) handleQueryFinished(msg queryFinishedMsg) {
 			Level: slog.LevelError, Message: "query failed", Connection: tab.connection.Name,
 			Engine: string(tab.connection.Driver), Duration: msg.result.Duration, Error: msg.err,
 		})
-		return
+		return m.recordHistoryCmd(tab, msg.result, statusForError(details.Cancelled), details.Message)
 	}
 	rows := int64(len(msg.result.Rows))
 	if len(msg.result.Columns) == 0 {
@@ -1185,6 +1320,7 @@ func (m *Model) handleQueryFinished(msg queryFinishedMsg) {
 		Level: slog.LevelInfo, Message: "query completed", Connection: tab.connection.Name,
 		Engine: string(tab.connection.Driver), Duration: msg.result.Duration, Rows: rows,
 	})
+	return m.recordHistoryCmd(tab, msg.result, queryhistory.StatusSuccess, "")
 }
 
 func queryTickCmd(tabID, requestID int) tea.Cmd {
@@ -1533,6 +1669,10 @@ func (m *Model) renderConfirmation() string {
 		title = "Quit tui-db?"
 		body = "Open query editors are session-only and will be discarded."
 		footer = "y quit  n/Esc cancel"
+	case modeConfirmHistoryClear:
+		title = "Clear query history?"
+		body = "Every persisted query history entry will be removed. Favorites and snippets are not affected."
+		footer = "y clear  n/Esc cancel"
 	}
 	content := m.styles.warning.Render(title) + "\n\n" + body + "\n\n" + m.styles.dim.Render(footer)
 	return m.center(m.styles.modal.Width(76).Render(content))
@@ -1551,10 +1691,12 @@ Workspace
 Query
   Ctrl+Enter            run statement at cursor
   Ctrl+Shift+Enter      run complete script
+  Ctrl+S                save current query as favorite
   Ctrl+Shift+F          format selection/current statement
   Ctrl+Space            open SQL autocomplete
   Ctrl+Shift+Space      start/clear a query selection
   Up/Down, Enter/Tab    navigate and accept autocomplete
+  Tab / Shift+Tab       expand snippet / navigate placeholders
   Esc                   close autocomplete
   F8 / Shift+F8         next / previous diagnostic
   Ctrl+C / Ctrl+G       cancel active query
@@ -1574,6 +1716,8 @@ Connections
   t / x / r             test, disconnect, refresh
 
 Application
+  Ctrl+H                query history
+  Ctrl+Shift+P          favorites and snippets
   Ctrl+L                activity logs
   F1 / ?                help
   Ctrl+Q                quit
