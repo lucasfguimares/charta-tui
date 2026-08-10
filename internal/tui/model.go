@@ -80,6 +80,7 @@ type queryTab struct {
 	analysis    sqleditor.Analysis
 	diagnostic  int
 	format      sqleditor.FormatOptions
+	completion  autocompleteState
 }
 
 type passwordAction int
@@ -191,6 +192,19 @@ type sqlAnalysisMsg struct {
 	result sqleditor.Analysis
 }
 
+type autocompleteCatalogMsg struct {
+	profileID string
+	requestID uint64
+	catalog   sqleditor.Catalog
+	err       error
+}
+
+type autocompleteResultMsg struct {
+	tabID     int
+	requestID uint64
+	result    sqleditor.CompletionResult
+}
+
 type logsLoadedMsg struct {
 	entries []activity.Entry
 	err     error
@@ -221,17 +235,19 @@ type Model struct {
 	isStatusError bool
 	styles        styles
 
-	form               profileForm
-	passwordInput      textinput.Model
-	resultInput        textinput.Model
-	pendingConnection  profile.Connection
-	pendingPasswordAct passwordAction
-	pendingSQL         string
-	pendingRunScript   bool
-	pendingDeleteID    string
-	logs               viewport.Model
-	cellDetail         viewport.Model
-	cellDetailText     string
+	form                  profileForm
+	passwordInput         textinput.Model
+	resultInput           textinput.Model
+	pendingConnection     profile.Connection
+	pendingPasswordAct    passwordAction
+	pendingSQL            string
+	pendingRunScript      bool
+	pendingDeleteID       string
+	logs                  viewport.Model
+	cellDetail            viewport.Model
+	cellDetailText        string
+	autocompleteCache     map[string]*autocompleteCatalogState
+	autocompleteRequestID uint64
 }
 
 // New creates the root Bubble Tea model with explicitly wired services.
@@ -251,27 +267,28 @@ func New(
 	resultInput.SetWidth(42)
 
 	model := &Model{
-		store:         store,
-		secrets:       secrets,
-		manager:       manager,
-		inspector:     inspector,
-		runner:        runner,
-		activity:      activityLog,
-		profiles:      []profile.Connection{},
-		catalog:       map[string]*catalogState{},
-		browserItems:  []browserItem{},
-		tabs:          []*queryTab{},
-		activeTab:     -1,
-		nextTabID:     1,
-		focus:         focusBrowser,
-		mode:          modeWorkspace,
-		isBrowserOpen: true,
-		statusText:    "Loading connections…",
-		styles:        defaultStyles(),
-		passwordInput: passwordInput,
-		resultInput:   resultInput,
-		logs:          viewport.New(),
-		cellDetail:    viewport.New(),
+		store:             store,
+		secrets:           secrets,
+		manager:           manager,
+		inspector:         inspector,
+		runner:            runner,
+		activity:          activityLog,
+		profiles:          []profile.Connection{},
+		catalog:           map[string]*catalogState{},
+		browserItems:      []browserItem{},
+		tabs:              []*queryTab{},
+		activeTab:         -1,
+		nextTabID:         1,
+		focus:             focusBrowser,
+		mode:              modeWorkspace,
+		isBrowserOpen:     true,
+		statusText:        "Loading connections…",
+		styles:            defaultStyles(),
+		passwordInput:     passwordInput,
+		resultInput:       resultInput,
+		logs:              viewport.New(),
+		cellDetail:        viewport.New(),
+		autocompleteCache: map[string]*autocompleteCatalogState{},
 	}
 	return model
 }
@@ -310,11 +327,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = modeWorkspace
 		delete(m.catalog, msg.connection.ID)
+		delete(m.autocompleteCache, msg.connection.ID)
 		m.statusText = fmt.Sprintf("Saved %s", msg.connection.Name)
 		m.isStatusError = false
 		return m, m.loadProfilesCmd()
 	case profileDeletedMsg:
 		delete(m.catalog, msg.profileID)
+		delete(m.autocompleteCache, msg.profileID)
 		if msg.err != nil {
 			m.setError(msg.err)
 			return m, m.loadProfilesCmd()
@@ -344,6 +363,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		delete(m.catalog, msg.connection.ID)
+		delete(m.autocompleteCache, msg.connection.ID)
 		m.rebuildBrowser()
 		m.statusText = fmt.Sprintf("Disconnected from %s", msg.connection.Name)
 		m.isStatusError = false
@@ -381,6 +401,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else if tab.diagnostic >= len(tab.analysis.Diagnostics) {
 			tab.diagnostic = len(tab.analysis.Diagnostics) - 1
 		}
+		return m, nil
+	case autocompleteCatalogMsg:
+		return m, m.handleAutocompleteCatalog(msg)
+	case autocompleteResultMsg:
+		m.handleAutocompleteResult(msg)
 		return m, nil
 	case logsLoadedMsg:
 		m.renderLogs(msg)
@@ -434,6 +459,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	if m.mode != modeWorkspace {
 		return m.handleModalKey(msg)
 	}
+	if m.focus == focusEditor {
+		if cmd, handled := m.handleAutocompleteKey(msg); handled {
+			return cmd
+		}
+	}
 
 	switch key {
 	case "ctrl+q":
@@ -484,6 +514,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.navigateDiagnostic(-1)
 		return nil
 	case "ctrl+space", "ctrl+@":
+		if m.focus == focusEditor {
+			return m.openAutocomplete()
+		}
+		return nil
+	case "ctrl+shift+space":
 		if m.focus == focusEditor {
 			m.toggleSelection()
 		}
@@ -747,6 +782,7 @@ func (m *Model) handleBrowserKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "r":
 		if connection, ok := m.selectedProfile(); ok {
 			delete(m.catalog, connection.ID)
+			delete(m.autocompleteCache, connection.ID)
 			return m.loadSchemasCmd(connection)
 		}
 	case "t":
@@ -770,6 +806,7 @@ func (m *Model) updateFocused(message tea.Msg) tea.Cmd {
 	switch m.focus {
 	case focusEditor:
 		before := tab.editor.Value()
+		beforeCursor, _ := cursorOffset(tab.editor)
 		updated, cmd := tab.editor.Update(message)
 		tab.editor = updated
 		after := tab.editor.Value()
@@ -778,7 +815,14 @@ func (m *Model) updateFocused(message tea.Msg) tea.Cmd {
 				tab.document = sqleditor.NewDocument(before)
 			}
 			version := tab.document.SetText(after)
+			if tab.completion.isOpen {
+				return tea.Batch(cmd, scheduleSQLAnalysis(tab.id, version), m.refreshAutocompleteCmd(tab))
+			}
 			return tea.Batch(cmd, scheduleSQLAnalysis(tab.id, version))
+		}
+		afterCursor, _ := cursorOffset(tab.editor)
+		if tab.completion.isOpen && beforeCursor != afterCursor {
+			return tea.Batch(cmd, m.refreshAutocompleteCmd(tab))
 		}
 		return cmd
 	case focusResults:
@@ -1508,7 +1552,10 @@ Query
   Ctrl+Enter            run statement at cursor
   Ctrl+Shift+Enter      run complete script
   Ctrl+Shift+F          format selection/current statement
-  Ctrl+Space            start/clear a query selection
+  Ctrl+Space            open SQL autocomplete
+  Ctrl+Shift+Space      start/clear a query selection
+  Up/Down, Enter/Tab    navigate and accept autocomplete
+  Esc                   close autocomplete
   F8 / Shift+F8         next / previous diagnostic
   Ctrl+C / Ctrl+G       cancel active query
 
@@ -1709,6 +1756,11 @@ func (m *Model) cycleFocus(delta int) {
 }
 
 func (m *Model) setFocus(next focus) {
+	if next != focusEditor {
+		if tab := m.currentTab(); tab != nil {
+			tab.completion.isOpen = false
+		}
+	}
 	m.focus = next
 	for _, tab := range m.tabs {
 		tab.editor.Blur()

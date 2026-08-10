@@ -27,6 +27,25 @@ func (d dialect) Supports(feature string) bool {
 	return ok
 }
 
+// Vocabulary returns sorted-independent copies of the keywords and functions
+// understood by a dialect. Completion sorts and ranks the values for the
+// current cursor context.
+func Vocabulary(value Dialect) (keywords, functions []string) {
+	d, ok := value.(dialect)
+	if !ok {
+		return nil, nil
+	}
+	keywords = make([]string, 0, len(d.keywords))
+	for keyword := range d.keywords {
+		keywords = append(keywords, keyword)
+	}
+	functions = make([]string, 0, len(d.functions))
+	for function := range d.functions {
+		functions = append(functions, function)
+	}
+	return keywords, functions
+}
+
 func words(values string) map[string]struct{} {
 	result := make(map[string]struct{})
 	for _, value := range strings.Fields(values) {

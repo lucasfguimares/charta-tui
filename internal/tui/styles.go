@@ -5,31 +5,34 @@ import (
 )
 
 type styles struct {
-	app          lipgloss.Style
-	header       lipgloss.Style
-	activeTab    lipgloss.Style
-	inactiveTab  lipgloss.Style
-	panel        lipgloss.Style
-	focusedPanel lipgloss.Style
-	status       lipgloss.Style
-	dim          lipgloss.Style
-	accent       lipgloss.Style
-	error        lipgloss.Style
-	warning      lipgloss.Style
-	modal        lipgloss.Style
-	selected     lipgloss.Style
-	keyword      lipgloss.Style
-	function     lipgloss.Style
-	string       lipgloss.Style
-	number       lipgloss.Style
-	operator     lipgloss.Style
-	comment      lipgloss.Style
-	schema       lipgloss.Style
-	table        lipgloss.Style
-	alias        lipgloss.Style
-	parameter    lipgloss.Style
-	identifier   lipgloss.Style
-	info         lipgloss.Style
+	app                lipgloss.Style
+	header             lipgloss.Style
+	activeTab          lipgloss.Style
+	inactiveTab        lipgloss.Style
+	panel              lipgloss.Style
+	focusedPanel       lipgloss.Style
+	status             lipgloss.Style
+	dim                lipgloss.Style
+	accent             lipgloss.Style
+	error              lipgloss.Style
+	warning            lipgloss.Style
+	modal              lipgloss.Style
+	selected           lipgloss.Style
+	keyword            lipgloss.Style
+	function           lipgloss.Style
+	string             lipgloss.Style
+	number             lipgloss.Style
+	operator           lipgloss.Style
+	comment            lipgloss.Style
+	schema             lipgloss.Style
+	table              lipgloss.Style
+	alias              lipgloss.Style
+	parameter          lipgloss.Style
+	identifier         lipgloss.Style
+	info               lipgloss.Style
+	autocomplete       lipgloss.Style
+	completionSelected lipgloss.Style
+	completionMatch    lipgloss.Style
 }
 
 func defaultStyles() styles {
@@ -63,5 +66,9 @@ func defaultStyles() styles {
 		parameter:  lipgloss.NewStyle().Foreground(lipgloss.Color("213")),
 		identifier: lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
 		info:       lipgloss.NewStyle().Foreground(lipgloss.Color("75")),
+		autocomplete: lipgloss.NewStyle().Border(lipgloss.RoundedBorder(), true).
+			BorderForeground(accent).Background(lipgloss.Color("235")).Padding(0, 1),
+		completionSelected: lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24")),
+		completionMatch:    lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Bold(true).Underline(true),
 	}
 }

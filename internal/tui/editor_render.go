@@ -21,7 +21,7 @@ type charDecoration struct {
 
 func (m *Model) renderSQLEditor(tab *queryTab, width, height int) string {
 	if tab.editor.Value() == "" {
-		return tab.editor.View()
+		return m.overlayAutocomplete(tab, tab.editor.View(), width, height, 0)
 	}
 	value := tab.editor.Value()
 	lines := strings.Split(value, "\n")
@@ -111,7 +111,26 @@ func (m *Model) renderSQLEditor(tab *queryTab, width, height int) string {
 		line := fmt.Sprintf("%s  Errors: %d | Warnings: %d | Current: %d/%d", current.String(), counts[0], counts[1], index+1, len(tab.analysis.Diagnostics))
 		result = append(result, severityStyle(m.styles, current.Severity).Render(truncate(line, width)))
 	}
-	return strings.Join(result, "\n")
+	return m.overlayAutocomplete(tab, strings.Join(result, "\n"), width, height, start)
+}
+
+func (m *Model) overlayAutocomplete(tab *queryTab, editor string, width, height, firstLine int) string {
+	if tab == nil || !tab.completion.isOpen || width < 34 || height < 3 {
+		return editor
+	}
+	popupWidth := min(68, max(30, width-4))
+	popup := m.renderAutocomplete(tab, popupWidth)
+	popupHeight := lipgloss.Height(popup)
+	gutterWidth := len(fmt.Sprint(max(1, len(strings.Split(tab.editor.Value(), "\n"))))) + 5
+	x := min(max(0, gutterWidth+tab.editor.Column()), max(0, width-lipgloss.Width(popup)))
+	y := tab.editor.Line() - firstLine + 1
+	if y+popupHeight > height {
+		y = max(0, tab.editor.Line()-firstLine-popupHeight)
+	}
+	canvas := lipgloss.NewCanvas(width, height)
+	canvas.Compose(lipgloss.NewLayer(editor))
+	canvas.Compose(lipgloss.NewLayer(popup).X(x).Y(y).Z(1))
+	return canvas.Render()
 }
 
 func decorateTokens(chars []charDecoration, line int, tokens []sqleditor.Token) {

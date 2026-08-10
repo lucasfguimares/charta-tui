@@ -182,3 +182,122 @@ func TestResizePreservesEditorState(t *testing.T) {
 		t.Fatalf("resize changed editor state: line=%d/%d col=%d/%d selection=%v", tab.editor.Line(), line, tab.editor.Column(), column, tab.selection)
 	}
 }
+
+func TestAutocompleteFiltersAndAcceptsQualifiedColumn(t *testing.T) {
+	t.Parallel()
+
+	editor := textarea.New()
+	editor.SetValue("SELECT u.\nFROM usr AS u")
+	setEditorCursor(&editor, strings.Index(editor.Value(), "\n"))
+	editor.Focus()
+	document := sqleditor.NewDocument(editor.Value())
+	tab := &queryTab{
+		id: 1, connection: profile.Connection{ID: "connection-1", Driver: profile.DriverSQLServer, DefaultSchema: "dbo"},
+		editor: editor, table: newResultTable(20), document: document,
+	}
+	model := &Model{
+		tabs: []*queryTab{tab}, activeTab: 0, focus: focusEditor, mode: modeWorkspace,
+		catalog: map[string]*catalogState{}, autocompleteCache: map[string]*autocompleteCatalogState{
+			"connection-1": {isLoaded: true, catalog: autocompleteTestCatalog()},
+		},
+		styles: defaultStyles(),
+	}
+
+	cmd := model.handleKey(tea.KeyPressMsg{Code: ' ', Mod: tea.ModCtrl})
+	model.Update(cmd())
+	if !tab.completion.isOpen || len(tab.completion.result.Items) != 4 {
+		t.Fatalf("completion open=%v items=%#v", tab.completion.isOpen, tab.completion.result.Items)
+	}
+	model.handleKey(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	cmd = model.refreshAutocompleteCmd(tab)
+	model.Update(cmd())
+	if got := completionItemLabels(tab.completion.result.Items); len(got) != 1 || got[0] != "usr_nome" {
+		t.Fatalf("filtered items = %#v", got)
+	}
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	if tab.completion.isOpen || tab.editor.Value() != "SELECT u.usr_nome\nFROM usr AS u" {
+		t.Fatalf("accepted completion open=%v SQL=%q", tab.completion.isOpen, tab.editor.Value())
+	}
+}
+
+func TestAutocompleteKeyboardNavigationAndRendering(t *testing.T) {
+	t.Parallel()
+
+	tab := &queryTab{connection: profile.Connection{ID: "connection-1"}, completion: autocompleteState{
+		isOpen: true,
+		result: sqleditor.CompletionResult{Items: []sqleditor.CompletionItem{
+			{Label: "usr_cod", Kind: sqleditor.CompletionColumn, SQLType: "INTEGER", IsPrimaryKey: true},
+			{Label: "usr_nome", Kind: sqleditor.CompletionColumn, SQLType: "VARCHAR", IsNullable: true, HasNullable: true},
+		}},
+	}}
+	model := &Model{
+		tabs: []*queryTab{tab}, activeTab: 0, focus: focusEditor, mode: modeWorkspace,
+		autocompleteCache: map[string]*autocompleteCatalogState{"connection-1": {isLoaded: true}},
+		styles:            defaultStyles(),
+	}
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if tab.completion.selected != 1 {
+		t.Fatalf("selected = %d, want 1", tab.completion.selected)
+	}
+	view := model.renderAutocomplete(tab, 58)
+	for _, text := range []string{"usr_nome", "COLUMN", "VARCHAR", "NULL", "Enter/Tab"} {
+		if !strings.Contains(view, text) {
+			t.Errorf("autocomplete render missing %q:\n%s", text, view)
+		}
+	}
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if tab.completion.isOpen {
+		t.Fatal("Esc did not close autocomplete")
+	}
+}
+
+func TestCompletionColumnMapsCatalogDetails(t *testing.T) {
+	t.Parallel()
+
+	column := completionColumn(database.Column{Name: "group_id", Type: "BIGINT", Nullable: true, Key: "PK/FK"})
+	if column.Name != "group_id" || column.SQLType != "BIGINT" || !column.IsNullable || !column.IsPrimaryKey || !column.IsForeignKey {
+		t.Fatalf("completionColumn() = %#v", column)
+	}
+}
+
+func TestAutocompleteDiscardsStaleResults(t *testing.T) {
+	t.Parallel()
+
+	tab := &queryTab{id: 7, completion: autocompleteState{isOpen: true, requestID: 2, isCalculating: true}}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0}
+	model.handleAutocompleteResult(autocompleteResultMsg{
+		tabID: 7, requestID: 1,
+		result: sqleditor.CompletionResult{Items: []sqleditor.CompletionItem{{Label: "stale"}}},
+	})
+	if len(tab.completion.result.Items) != 0 || !tab.completion.isCalculating {
+		t.Fatalf("stale completion was applied: %#v", tab.completion)
+	}
+	model.handleAutocompleteResult(autocompleteResultMsg{
+		tabID: 7, requestID: 2,
+		result: sqleditor.CompletionResult{Items: []sqleditor.CompletionItem{{Label: "current"}}},
+	})
+	if len(tab.completion.result.Items) != 1 || tab.completion.result.Items[0].Label != "current" || tab.completion.isCalculating {
+		t.Fatalf("current completion was not applied: %#v", tab.completion)
+	}
+}
+
+func autocompleteTestCatalog() sqleditor.Catalog {
+	return sqleditor.Catalog{DefaultSchema: "dbo", Schemas: []sqleditor.SchemaMetadata{{
+		Name: "dbo", Relations: []sqleditor.RelationMetadata{{
+			Schema: "dbo", Name: "usr", Kind: "BASE TABLE", Columns: []sqleditor.ColumnMetadata{
+				{Name: "usr_cod", SQLType: "INTEGER", IsPrimaryKey: true},
+				{Name: "usr_nome", SQLType: "VARCHAR"},
+				{Name: "usr_status", SQLType: "CHAR"},
+				{Name: "usr_grp", SQLType: "INTEGER", IsForeignKey: true},
+			},
+		}},
+	}}}
+}
+
+func completionItemLabels(items []sqleditor.CompletionItem) []string {
+	labels := make([]string, len(items))
+	for index, item := range items {
+		labels[index] = item.Label
+	}
+	return labels
+}

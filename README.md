@@ -12,6 +12,7 @@
 - Multiple query tabs with per-tab cancellation
 - Statement-at-cursor and marked-selection execution
 - Dialect-aware SQL highlighting, diagnostics, delimiter matching, and formatting
+- Context-aware SQL autocomplete backed by parsed query scopes and cached connection metadata
 - Debounced background validation with inline error markers and F8 navigation
 - Full-script execution and driver error locations mapped back into the editor
 - Virtualized result grid with fixed headers, active cells, and horizontal scrolling
@@ -69,7 +70,11 @@ Network connections default to certificate and hostname verification. For develo
 | Query | `Ctrl+Shift+Enter` | Run the complete script |
 | Query | `Ctrl+Shift+F` | Format the marked selection or current statement |
 | Query | `F8` / `Shift+F8` | Move to the next or previous diagnostic |
-| Query | `Ctrl+Space` | Start or clear a selection at the cursor |
+| Query | `Ctrl+Space` | Open contextual SQL autocomplete |
+| Query | `Up` / `Down` | Navigate autocomplete suggestions |
+| Query | `Enter` / `Tab` | Accept the selected autocomplete suggestion |
+| Query | `Esc` | Close autocomplete |
+| Query | `Ctrl+Shift+Space` | Start or clear a selection at the cursor |
 | Query | `Ctrl+C` / `Ctrl+G` | Cancel the active query |
 | Results | arrows / `WASD` | Move the active cell |
 | Results | `PageUp` / `PageDown` | Move one result page |
