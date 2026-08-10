@@ -36,6 +36,7 @@ func (f *profileForm) rebuild(password string) {
 		"host":         f.connection.Host,
 		"port":         strconv.Itoa(int(f.connection.Port)),
 		"database":     f.connection.Database,
+		"schema":       f.connection.DefaultSchema,
 		"username":     f.connection.Username,
 		"path":         f.connection.SQLitePath,
 		"read_only":    strconv.FormatBool(f.connection.SQLiteReadOnly),
@@ -51,6 +52,7 @@ func (f *profileForm) rebuild(password string) {
 	if f.connection.Driver == profile.DriverSQLite {
 		definitions = append(definitions,
 			[3]string{"path", "Database file", "/path/to/database.sqlite"},
+			[3]string{"schema", "Default schema", profile.NativeDefaultSchema(f.connection.Driver)},
 			[3]string{"read_only", "Read only", "true or false"},
 		)
 	} else {
@@ -58,6 +60,7 @@ func (f *profileForm) rebuild(password string) {
 			[3]string{"host", "Host", "localhost"},
 			[3]string{"port", "Port", "port"},
 			[3]string{"database", "Database", "database name"},
+			[3]string{"schema", "Default schema", profile.NativeDefaultSchema(f.connection.Driver)},
 			[3]string{"username", "Username", "database user"},
 			[3]string{"password", "Password", "stored in keyring"},
 			[3]string{"tls", "TLS mode", "verify-full, verify-ca, require, disable"},
@@ -120,15 +123,19 @@ func (f *profileForm) update(msg tea.KeyPressMsg) tea.Cmd {
 		case profile.DriverPostgres:
 			f.connection.Driver = profile.DriverSQLServer
 			f.connection.Port = 1433
+			f.connection.DefaultSchema = profile.NativeDefaultSchema(f.connection.Driver)
 		case profile.DriverSQLServer:
 			f.connection.Driver = profile.DriverSQLite
+			f.connection.DefaultSchema = profile.NativeDefaultSchema(f.connection.Driver)
 		case profile.DriverSQLite:
 			f.connection.Driver = profile.DriverPostgres
 			f.connection.Host = "localhost"
 			f.connection.Port = 5432
 			f.connection.TLS.Mode = profile.TLSModeVerifyFull
+			f.connection.DefaultSchema = profile.NativeDefaultSchema(f.connection.Driver)
 		default:
 			f.connection.Driver = profile.DriverPostgres
+			f.connection.DefaultSchema = profile.NativeDefaultSchema(f.connection.Driver)
 		}
 		f.rebuild(password)
 		return nil
@@ -142,6 +149,7 @@ func (f *profileForm) applyValues() {
 	f.connection.Name = strings.TrimSpace(f.value("name"))
 	f.connection.Host = strings.TrimSpace(f.value("host"))
 	f.connection.Database = strings.TrimSpace(f.value("database"))
+	f.connection.DefaultSchema = strings.TrimSpace(f.value("schema"))
 	f.connection.Username = strings.TrimSpace(f.value("username"))
 	f.connection.SQLitePath = strings.TrimSpace(f.value("path"))
 	f.connection.SQLiteReadOnly, _ = strconv.ParseBool(f.value("read_only"))

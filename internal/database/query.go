@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/tui-db/internal/sqleditor"
 	"github.com/lucasfguimares/tui-db/internal/sqlscan"
 	"github.com/ncruces/go-sqlite3/driver"
 )
@@ -88,6 +89,7 @@ func (r *Runner) RunScript(ctx context.Context, connection profile.Connection, s
 }
 
 func (r *Runner) run(ctx context.Context, connection profile.Connection, statement string) (Result, error) {
+	statement = statementForConnection(connection, statement)
 	analysis := sqlscan.Analyze(statement)
 	db, err := r.manager.Connection(ctx, connection)
 	if err != nil {
@@ -137,6 +139,20 @@ func (r *Runner) run(ctx context.Context, connection profile.Connection, stateme
 		QueryDuration: queryDuration,
 		Limit:         connection.RowLimit,
 	}, nil
+}
+
+func statementForConnection(connection profile.Connection, statement string) string {
+	if connection.DefaultSchema == "" {
+		return statement
+	}
+	switch connection.Driver {
+	case profile.DriverSQLServer:
+		return sqleditor.QualifyRelations(statement, sqleditor.TSQL(), connection.DefaultSchema)
+	case profile.DriverSQLite:
+		return sqleditor.QualifyRelations(statement, sqleditor.SQLite(), connection.DefaultSchema)
+	default:
+		return statement
+	}
 }
 
 func runQuery(

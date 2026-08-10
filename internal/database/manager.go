@@ -152,6 +152,9 @@ func (m *Manager) dataSource(connection profile.Connection) (string, string, err
 	case profile.DriverPostgres:
 		query := url.Values{}
 		query.Set("sslmode", postgresTLSMode(connection.TLS.Mode))
+		if connection.DefaultSchema != "" {
+			query.Set("search_path", postgresSearchPath(connection.DefaultSchema))
+		}
 		if connection.TLS.CAFile != "" {
 			query.Set("sslrootcert", connection.TLS.CAFile)
 		}
@@ -178,6 +181,14 @@ func (m *Manager) dataSource(connection profile.Connection) (string, string, err
 	default:
 		return "", "", errors.New("database: unsupported driver")
 	}
+}
+
+func postgresSearchPath(schema string) string {
+	quoted := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
+	if schema == "public" {
+		return quoted
+	}
+	return quoted + ", public"
 }
 
 func configurePool(db *sql.DB, driver profile.Driver) {

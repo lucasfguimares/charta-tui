@@ -294,6 +294,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.profiles = msg.profiles
+		m.syncTabConnections()
 		m.rebuildBrowser()
 		if len(m.profiles) == 0 {
 			m.statusText = "No connections yet — press a to add one"
@@ -308,6 +309,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = modeWorkspace
+		delete(m.catalog, msg.connection.ID)
 		m.statusText = fmt.Sprintf("Saved %s", msg.connection.Name)
 		m.isStatusError = false
 		return m, m.loadProfilesCmd()
@@ -1166,12 +1168,27 @@ func (m *Model) handleSchemas(msg schemasLoadedMsg) tea.Cmd {
 	state.isExpanded = true
 	m.rebuildBrowser()
 	if connection, ok := m.profileByID(msg.profileID); ok {
+		defaultSchema, schemaFound := findSchema(msg.schemas, connection.Driver, connection.DefaultSchema)
+		if connection.DefaultSchema != "" && !schemaFound {
+			m.setError(fmt.Errorf("default schema %q was not found in %s", connection.DefaultSchema, connection.Name))
+			return nil
+		}
 		m.ensureTab(connection)
 		m.statusText = fmt.Sprintf("Connected to %s", connection.Name)
+		if connection.DefaultSchema != "" {
+			m.statusText += fmt.Sprintf(" (schema %s)", connection.DefaultSchema)
+		}
 		m.activity.Record(context.Background(), activity.Event{
 			Level: slog.LevelInfo, Message: "connection opened", Connection: connection.Name,
 			Engine: string(connection.Driver),
 		})
+		if connection.DefaultSchema != "" {
+			if _, loaded := state.relations[defaultSchema]; !loaded {
+				return m.loadRelationsCmd(connection, defaultSchema)
+			}
+			state.expanded[defaultSchema] = true
+			m.rebuildBrowser()
+		}
 	}
 	return nil
 }
@@ -1212,8 +1229,12 @@ func (m *Model) rebuildBrowser() {
 			continue
 		}
 		for _, schema := range state.schemas {
+			label := schema
+			if containsSchema([]string{schema}, connection.Driver, connection.DefaultSchema) {
+				label += "  (default)"
+			}
 			items = append(items, browserItem{
-				kind: browserSchema, level: 1, label: schema, profileID: connection.ID,
+				kind: browserSchema, level: 1, label: label, profileID: connection.ID,
 				schema: schema, isExpanded: state.expanded[schema],
 			})
 			if !state.expanded[schema] {
@@ -1346,7 +1367,11 @@ func (m *Model) renderStatus() string {
 	}
 	if tab := m.currentTab(); tab != nil && m.focus == focusEditor {
 		errors := diagnosticCounts(tab.analysis.Diagnostics)[0]
-		prefix := fmt.Sprintf("%s | %s | UTF-8 | Errors: %d", dialectFor(tab.connection.Driver).DisplayName(), cursorStatus(tab), errors)
+		prefix := dialectFor(tab.connection.Driver).DisplayName()
+		if tab.connection.DefaultSchema != "" {
+			prefix += " [" + tab.connection.DefaultSchema + "]"
+		}
+		prefix += fmt.Sprintf(" | %s | UTF-8 | Errors: %d", cursorStatus(tab), errors)
 		if len(tab.analysis.Diagnostics) > 0 {
 			current := tab.analysis.Diagnostics[min(tab.diagnostic, len(tab.analysis.Diagnostics)-1)]
 			prefix += " | " + current.Severity.String() + ": " + current.Message
@@ -1715,6 +1740,14 @@ func (m *Model) tabByID(id int) *queryTab {
 	return nil
 }
 
+func (m *Model) syncTabConnections() {
+	for _, tab := range m.tabs {
+		if connection, ok := m.profileByID(tab.connection.ID); ok {
+			tab.connection = connection
+		}
+	}
+}
+
 func (m *Model) selectedProfile() (profile.Connection, bool) {
 	if m.browserCursor < 0 || m.browserCursor >= len(m.browserItems) {
 		return profile.Connection{}, false
@@ -1956,6 +1989,20 @@ func defaultSQL(driver profile.Driver) string {
 
 func catalogKey(schema, relation string) string {
 	return schema + "\x00" + relation
+}
+
+func containsSchema(schemas []string, driver profile.Driver, target string) bool {
+	_, ok := findSchema(schemas, driver, target)
+	return ok
+}
+
+func findSchema(schemas []string, driver profile.Driver, target string) (string, bool) {
+	for _, schema := range schemas {
+		if schema == target || driver == profile.DriverSQLServer && strings.EqualFold(schema, target) {
+			return schema, true
+		}
+	}
+	return "", false
 }
 
 func formatDuration(duration time.Duration) string {

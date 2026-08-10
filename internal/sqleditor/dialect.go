@@ -63,7 +63,7 @@ func makeDialect(id, name, extraKeywords, extraFunctions string, fs ...string) D
 func ANSI() Dialect { return makeDialect("ansi", "SQL", "", "", "double_quote") }
 func TSQL() Dialect {
 	return makeDialect("tsql", "T-SQL", `TOP PERCENT TIES APPLY OUTER APPLY GO EXEC EXECUTE TRY CATCH
-IDENTITY NOCOUNT NVARCHAR DATETIME2 BIT MONEY`, `GETDATE SYSDATETIME DATEPART CHARINDEX LEN SCOPE_IDENTITY`,
+IDENTITY NOCOUNT NVARCHAR DATETIME2 BIT MONEY`, `GETDATE SYSDATETIME DATEPART CHARINDEX LEN SCOPE_IDENTITY OPENJSON OPENXML STRING_SPLIT`,
 		"top", "brackets", "at_parameters")
 }
 func PostgreSQL() Dialect {
@@ -78,7 +78,7 @@ USE UNSIGNED AUTO_INCREMENT ENGINE`, `DATE_FORMAT GROUP_CONCAT LAST_INSERT_ID`,
 }
 func SQLite() Dialect {
 	return makeDialect("sqlite", "SQLite", `PRAGMA ATTACH DETACH WITHOUT ROWID VACUUM GLOB`,
-		`JULIANDAY TOTAL_CHANGES LAST_INSERT_ROWID`, "limit", "returning", "brackets", "question_parameters")
+		`JULIANDAY TOTAL_CHANGES LAST_INSERT_ROWID JSON_EACH JSON_TREE PRAGMA_TABLE_INFO`, "limit", "returning", "brackets", "question_parameters")
 }
 
 func ByID(id string) Dialect {

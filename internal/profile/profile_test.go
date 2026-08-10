@@ -22,6 +22,7 @@ func TestConnectionValidate(t *testing.T) {
 		{name: "invalid row limit", mutate: func(c *Connection) { c.RowLimit = 100001 }, wantError: true},
 		{name: "invalid maximum column width", mutate: func(c *Connection) { c.MaxColumnWidth = 7 }, wantError: true},
 		{name: "unsupported tls", mutate: func(c *Connection) { c.TLS.Mode = "mystery" }, wantError: true},
+		{name: "invalid default schema", mutate: func(c *Connection) { c.DefaultSchema = "tenant\nother" }, wantError: true},
 	}
 
 	for _, test := range tests {
@@ -39,6 +40,21 @@ func TestConnectionValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, wantError %v", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestNewConnectionDefaultSchema(t *testing.T) {
+	t.Parallel()
+	for driver, want := range map[Driver]string{
+		DriverPostgres: "public", DriverSQLServer: "dbo", DriverSQLite: "main",
+	} {
+		connection, err := NewConnection(driver)
+		if err != nil {
+			t.Fatalf("NewConnection(%s): %v", driver, err)
+		}
+		if connection.DefaultSchema != want {
+			t.Errorf("NewConnection(%s).DefaultSchema = %q, want %q", driver, connection.DefaultSchema, want)
+		}
 	}
 }
 

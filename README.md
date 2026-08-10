@@ -6,6 +6,7 @@
 
 - PostgreSQL, Microsoft SQL Server, and SQLite connections
 - Saved connection profiles with passwords kept out of the profile file
+- Per-connection default schema for unqualified SQL interactions
 - OS keyring integration, with an in-memory fallback when a keyring is unavailable
 - Browsable schemas, tables, views, and columns
 - Multiple query tabs with per-tab cancellation
@@ -47,6 +48,8 @@ Use `tui-db --help` for all flags and `tui-db version` for build metadata. A cus
 ## First connection
 
 Press `a` in the connection browser, select the database engine with `Ctrl+D`, complete the form, and save with `Ctrl+S`. Passwords are requested when needed and are never written to the connection profile JSON.
+
+The optional **Default schema** field controls resolution of unqualified relation names. New PostgreSQL, SQL Server, and SQLite profiles start with `public`, `dbo`, and `main`, respectively. PostgreSQL applies it as the first entry in `search_path`; SQL Server and SQLite safely qualify otherwise-unqualified relations at execution time. Explicitly qualified names and CTE references are left unchanged. The schema is validated when the catalog is loaded and automatically expanded in the browser.
 
 Network connections default to certificate and hostname verification. For development databases without TLS, explicitly select the `disable` TLS mode in the profile. SQLite profiles accept a local database path and can be opened read-only.
 

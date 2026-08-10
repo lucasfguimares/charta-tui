@@ -252,7 +252,7 @@ func classifyIdentifiers(tokens []Token) {
 		if p+1 < len(sig) {
 			next = tokens[sig[p+1]].Text
 		}
-		isRelationStart := prev == "FROM" || prev == "JOIN" || prev == "UPDATE" || prev == "INTO" || prev == "TABLE" || prev == "USING"
+		isRelationStart := prev == "FROM" || prev == "JOIN" || prev == "UPDATE" || prev == "DELETE" || prev == "MERGE" || prev == "INTO" || prev == "TABLE" || prev == "VIEW" || prev == "USING" || prev == "EXEC" || prev == "EXECUTE"
 		if isRelationStart {
 			if next == "." {
 				tokens[index].Kind = TokenSchema

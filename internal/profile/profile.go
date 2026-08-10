@@ -53,6 +53,7 @@ type Connection struct {
 	Host                string `json:"host,omitempty"`
 	Port                uint16 `json:"port,omitempty"`
 	Database            string `json:"database,omitempty"`
+	DefaultSchema       string `json:"default_schema,omitempty"`
 	Username            string `json:"username,omitempty"`
 	SQLitePath          string `json:"sqlite_path,omitempty"`
 	SQLiteReadOnly      bool   `json:"sqlite_read_only,omitempty"`
@@ -85,12 +86,15 @@ func NewConnection(driver Driver) (Connection, error) {
 		connection.Name = "PostgreSQL"
 		connection.Host = "localhost"
 		connection.Port = 5432
+		connection.DefaultSchema = NativeDefaultSchema(driver)
 	case DriverSQLServer:
 		connection.Name = "SQL Server"
 		connection.Host = "localhost"
 		connection.Port = 1433
+		connection.DefaultSchema = NativeDefaultSchema(driver)
 	case DriverSQLite:
 		connection.Name = "SQLite"
+		connection.DefaultSchema = NativeDefaultSchema(driver)
 		connection.TLS.Mode = TLSModeDefault
 	default:
 		return Connection{}, errors.New("profile: unsupported driver")
@@ -115,6 +119,12 @@ func (c Connection) Validate() error {
 	}
 	if c.MaxColumnWidth != 0 && (c.MaxColumnWidth < 8 || c.MaxColumnWidth > 200) {
 		return errors.New("profile: maximum column width must be between 8 and 200")
+	}
+	if strings.ContainsAny(c.DefaultSchema, "\x00\r\n") {
+		return errors.New("profile: default schema contains invalid characters")
+	}
+	if c.DefaultSchema != strings.TrimSpace(c.DefaultSchema) {
+		return errors.New("profile: default schema cannot start or end with whitespace")
 	}
 
 	switch c.Driver {
@@ -155,6 +165,22 @@ func (c Connection) Validate() error {
 	}
 
 	return nil
+}
+
+// NativeDefaultSchema returns the conventional schema for a new connection.
+// An empty DefaultSchema on a persisted profile keeps the database user's
+// native resolution rules for backward compatibility.
+func NativeDefaultSchema(driver Driver) string {
+	switch driver {
+	case DriverPostgres:
+		return "public"
+	case DriverSQLServer:
+		return "dbo"
+	case DriverSQLite:
+		return "main"
+	default:
+		return ""
+	}
 }
 
 // EffectiveMaxColumnWidth preserves compatibility with profiles created

@@ -173,6 +173,33 @@ func TestLargeScript(t *testing.T) {
 	}
 }
 
+func TestQualifyRelations(t *testing.T) {
+	tests := []struct{ name, sql, schema, want string }{
+		{name: "select and join", sql: "SELECT * FROM usr u JOIN grp g ON g.id = u.grp_id;", schema: "tenant", want: "SELECT * FROM [tenant].usr u JOIN [tenant].grp g ON g.id = u.grp_id;"},
+		{name: "already qualified", sql: "SELECT * FROM audit.usr;", schema: "tenant", want: "SELECT * FROM audit.usr;"},
+		{name: "cte", sql: "WITH usr AS (SELECT * FROM source_usr) SELECT * FROM usr;", schema: "tenant", want: "WITH usr AS (SELECT * FROM [tenant].source_usr) SELECT * FROM usr;"},
+		{name: "cte column list", sql: "WITH usr(id) AS (SELECT id FROM source_usr) SELECT * FROM usr;", schema: "tenant", want: "WITH usr(id) AS (SELECT id FROM [tenant].source_usr) SELECT * FROM usr;"},
+		{name: "update alias", sql: "UPDATE u SET name = 'x' FROM users u WHERE u.id = 1;", schema: "tenant", want: "UPDATE u SET name = 'x' FROM [tenant].users u WHERE u.id = 1;"},
+		{name: "delete alias", sql: "DELETE u FROM users u WHERE u.id = 1;", schema: "tenant", want: "DELETE u FROM [tenant].users u WHERE u.id = 1;"},
+		{name: "merge without into", sql: "MERGE users AS u USING source AS s ON s.id = u.id WHEN MATCHED THEN DELETE;", schema: "tenant", want: "MERGE [tenant].users AS u USING [tenant].source AS s ON s.id = u.id WHEN MATCHED THEN DELETE;"},
+		{name: "comments and strings", sql: "SELECT 'FROM usr' FROM usr -- FROM grp", schema: "my schema", want: "SELECT 'FROM usr' FROM [my schema].usr -- FROM grp"},
+		{name: "built in table function", sql: "SELECT * FROM OPENJSON(@json);", schema: "tenant", want: "SELECT * FROM OPENJSON(@json);"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := QualifyRelations(test.sql, TSQL(), test.schema); got != test.want {
+				t.Fatalf("QualifyRelations() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestQualifyRelationsSQLite(t *testing.T) {
+	if got := QualifyRelations("SELECT * FROM events;", SQLite(), "archive"); got != `SELECT * FROM "archive".events;` {
+		t.Fatalf("QualifyRelations(SQLite) = %q", got)
+	}
+}
+
 func joinTokenText(tokens []Token) string {
 	var b strings.Builder
 	for _, token := range tokens {
