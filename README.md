@@ -10,6 +10,9 @@
 - Browsable schemas, tables, views, and columns
 - Multiple query tabs with per-tab cancellation
 - Statement-at-cursor and marked-selection execution
+- Dialect-aware SQL highlighting, diagnostics, delimiter matching, and formatting
+- Debounced background validation with inline error markers and F8 navigation
+- Full-script execution and driver error locations mapped back into the editor
 - Virtualized result grid with fixed headers, active cells, and horizontal scrolling
 - PK/FK result markers backed by database result-set and catalog metadata
 - Typed cell formatting, full-value details, search, row jump, and clipboard actions
@@ -60,6 +63,9 @@ Network connections default to certificate and hostname verification. For develo
 | Tabs | `Ctrl+W` | Close the active tab |
 | Tabs | `Ctrl+PgUp` / `Ctrl+PgDn` | Switch tabs |
 | Query | `Ctrl+Enter` | Run the marked selection or statement at the cursor |
+| Query | `Ctrl+Shift+Enter` | Run the complete script |
+| Query | `Ctrl+Shift+F` | Format the marked selection or current statement |
+| Query | `F8` / `Shift+F8` | Move to the next or previous diagnostic |
 | Query | `Ctrl+Space` | Start or clear a selection at the cursor |
 | Query | `Ctrl+C` / `Ctrl+G` | Cancel the active query |
 | Results | arrows / `WASD` | Move the active cell |
@@ -74,6 +80,8 @@ Network connections default to certificate and hostname verification. For develo
 | Browser | `t` / `x` / `r` | Test, disconnect, or refresh a connection |
 
 A marked selection must contain exactly one SQL statement. Without a selection, the statement containing the cursor is run. Potentially mutating statements require confirmation; `!` in that confirmation trusts writes for the current tab only.
+
+The editor selects its SQL dialect from the active connection (T-SQL, PostgreSQL, or SQLite); the editor core also defines MySQL/MariaDB vocabulary for future connection support. Formatting defaults to four spaces, uppercase keywords, trailing commas, and line breaks for columns, joins, and boolean expressions. These choices are represented by `sqleditor.FormatOptions` so frontends or future persisted settings can change them without coupling formatting to rendering.
 
 The result footer reports row and column counts, query/fetch/render timing, the active cell, viewport range, and the configured row limit. Result column width is configurable per connection and defaults to 40 terminal cells.
 

@@ -17,6 +17,7 @@ type ErrorDetails struct {
 	Message   string
 	Code      string
 	Line      int
+	Column    int
 	Position  int
 	Duration  time.Duration
 	Cancelled bool

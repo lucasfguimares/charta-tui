@@ -18,6 +18,18 @@ type styles struct {
 	warning      lipgloss.Style
 	modal        lipgloss.Style
 	selected     lipgloss.Style
+	keyword      lipgloss.Style
+	function     lipgloss.Style
+	string       lipgloss.Style
+	number       lipgloss.Style
+	operator     lipgloss.Style
+	comment      lipgloss.Style
+	schema       lipgloss.Style
+	table        lipgloss.Style
+	alias        lipgloss.Style
+	parameter    lipgloss.Style
+	identifier   lipgloss.Style
+	info         lipgloss.Style
 }
 
 func defaultStyles() styles {
@@ -32,12 +44,24 @@ func defaultStyles() styles {
 			BorderForeground(lipgloss.Color("238")),
 		focusedPanel: lipgloss.NewStyle().Border(lipgloss.RoundedBorder(), true).
 			BorderForeground(accent),
-		status:   lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(lipgloss.Color("236")).Padding(0, 1),
-		dim:      lipgloss.NewStyle().Foreground(muted),
-		accent:   lipgloss.NewStyle().Foreground(accent).Bold(true),
-		error:    lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
-		warning:  lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true),
-		modal:    lipgloss.NewStyle().Border(lipgloss.DoubleBorder(), true).BorderForeground(accent).Padding(1, 2),
-		selected: lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24")),
+		status:     lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(lipgloss.Color("236")).Padding(0, 1),
+		dim:        lipgloss.NewStyle().Foreground(muted),
+		accent:     lipgloss.NewStyle().Foreground(accent).Bold(true),
+		error:      lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
+		warning:    lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true),
+		modal:      lipgloss.NewStyle().Border(lipgloss.DoubleBorder(), true).BorderForeground(accent).Padding(1, 2),
+		selected:   lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24")),
+		keyword:    lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true),
+		function:   lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
+		string:     lipgloss.NewStyle().Foreground(lipgloss.Color("114")),
+		number:     lipgloss.NewStyle().Foreground(lipgloss.Color("215")),
+		operator:   lipgloss.NewStyle().Foreground(lipgloss.Color("222")),
+		comment:    lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true),
+		schema:     lipgloss.NewStyle().Foreground(lipgloss.Color("117")),
+		table:      lipgloss.NewStyle().Foreground(lipgloss.Color("159")),
+		alias:      lipgloss.NewStyle().Foreground(lipgloss.Color("151")),
+		parameter:  lipgloss.NewStyle().Foreground(lipgloss.Color("213")),
+		identifier: lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
+		info:       lipgloss.NewStyle().Foreground(lipgloss.Color("75")),
 	}
 }

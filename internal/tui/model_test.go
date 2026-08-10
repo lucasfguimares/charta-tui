@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/lucasfguimares/tui-db/internal/database"
 	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/tui-db/internal/sqleditor"
 )
 
 func TestStatementAtCursor(t *testing.T) {
@@ -123,5 +125,60 @@ func TestFormatDuration(t *testing.T) {
 				t.Fatalf("formatDuration() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestFormatCurrentPreservesLogicalCursor(t *testing.T) {
+	editor := textarea.New()
+	editor.SetValue("select usr_cod,usr_nome from usr where usr_status='A';")
+	cursor := strings.Index(editor.Value(), "usr_nome") + 4
+	setEditorCursor(&editor, cursor)
+	document := sqleditor.NewDocument(editor.Value())
+	analysis := sqleditor.Analyze(editor.Value(), sqleditor.TSQL(), document.Version())
+	_ = document.Apply(analysis)
+	tab := &queryTab{connection: profile.Connection{Driver: profile.DriverSQLServer}, editor: editor, document: document, analysis: analysis, format: sqleditor.DefaultFormatOptions()}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0, focus: focusEditor, styles: defaultStyles()}
+	model.formatCurrent()
+	offset, ok := cursorOffset(tab.editor)
+	if !ok {
+		t.Fatal("cursorOffset failed after formatting")
+	}
+	tokens, _ := (sqleditor.Lexer{Dialect: sqleditor.TSQL()}).Lex(tab.editor.Value())
+	found := false
+	for _, token := range tokens {
+		if token.Text == "usr_nome" && offset >= token.Range.Start.Offset && offset <= token.Range.End.Offset {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("cursor moved outside logical token: offset=%d SQL=\n%s", offset, tab.editor.Value())
+	}
+}
+
+func TestEditorRenderShowsLineMarkerAndDiagnosticInSmallViewport(t *testing.T) {
+	editor := textarea.New()
+	editor.SetValue("SELECT *\nFROM usr\nWHERE id =")
+	editor.SetWidth(24)
+	editor.SetHeight(3)
+	analysis := sqleditor.Analyze(editor.Value(), sqleditor.TSQL(), 1)
+	tab := &queryTab{editor: editor, analysis: analysis}
+	model := &Model{focus: focusEditor, styles: defaultStyles()}
+	view := model.renderSQLEditor(tab, 24, 3)
+	if !strings.Contains(view, "!") || !strings.Contains(view, "ERROR [Ln 3, Col 10]") {
+		t.Fatalf("rendered editor lacks diagnostic marker/panel:\n%s", view)
+	}
+}
+
+func TestResizePreservesEditorState(t *testing.T) {
+	editor := textarea.New()
+	editor.SetValue(strings.Repeat("SELECT 1;\n", 40))
+	editor.MoveToEnd()
+	selection := 3
+	tab := &queryTab{editor: editor, table: newResultTable(20), selection: &selection}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0, width: 120, height: 40, isBrowserOpen: true}
+	before, line, column := tab.editor.Value(), tab.editor.Line(), tab.editor.Column()
+	model.resize()
+	if tab.editor.Value() != before || tab.editor.Line() != line || tab.editor.Column() != column || tab.selection == nil || *tab.selection != selection {
+		t.Fatalf("resize changed editor state: line=%d/%d col=%d/%d selection=%v", tab.editor.Line(), line, tab.editor.Column(), column, tab.selection)
 	}
 }

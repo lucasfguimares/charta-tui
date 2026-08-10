@@ -20,6 +20,7 @@ import (
 	"github.com/lucasfguimares/tui-db/internal/activity"
 	"github.com/lucasfguimares/tui-db/internal/database"
 	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/tui-db/internal/sqleditor"
 	"github.com/lucasfguimares/tui-db/internal/sqlscan"
 )
 
@@ -61,19 +62,24 @@ type profileRepository interface {
 }
 
 type queryTab struct {
-	id         int
-	connection profile.Connection
-	editor     textarea.Model
-	table      *resultTableModel
-	result     database.Result
-	isRunning  bool
-	isTrusted  bool
-	requestID  int
-	cancel     context.CancelFunc
-	statusText string
-	selection  *int
-	startedAt  time.Time
-	lastSQL    string
+	id          int
+	connection  profile.Connection
+	editor      textarea.Model
+	table       *resultTableModel
+	result      database.Result
+	isRunning   bool
+	isTrusted   bool
+	requestID   int
+	cancel      context.CancelFunc
+	statusText  string
+	selection   *int
+	startedAt   time.Time
+	lastSQL     string
+	lastSQLBase int
+	document    *sqleditor.Document
+	analysis    sqleditor.Analysis
+	diagnostic  int
+	format      sqleditor.FormatOptions
 }
 
 type passwordAction int
@@ -175,6 +181,16 @@ type queryTickMsg struct {
 	requestID int
 }
 
+type sqlAnalysisDueMsg struct {
+	tabID   int
+	version uint64
+}
+
+type sqlAnalysisMsg struct {
+	tabID  int
+	result sqleditor.Analysis
+}
+
 type logsLoadedMsg struct {
 	entries []activity.Entry
 	err     error
@@ -211,6 +227,7 @@ type Model struct {
 	pendingConnection  profile.Connection
 	pendingPasswordAct passwordAction
 	pendingSQL         string
+	pendingRunScript   bool
 	pendingDeleteID    string
 	logs               viewport.Model
 	cellDetail         viewport.Model
@@ -342,6 +359,27 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, queryTickCmd(msg.tabID, msg.requestID)
+	case sqlAnalysisDueMsg:
+		tab := m.tabByID(msg.tabID)
+		if tab == nil || tab.document == nil || tab.document.Version() != msg.version {
+			return m, nil
+		}
+		text, dialect := tab.document.Text(), dialectFor(tab.connection.Driver)
+		return m, func() tea.Msg {
+			return sqlAnalysisMsg{tabID: msg.tabID, result: sqleditor.Analyze(text, dialect, msg.version)}
+		}
+	case sqlAnalysisMsg:
+		tab := m.tabByID(msg.tabID)
+		if tab == nil || tab.document == nil || !tab.document.Apply(msg.result) {
+			return m, nil
+		}
+		tab.analysis = msg.result
+		if len(tab.analysis.Diagnostics) == 0 {
+			tab.diagnostic = 0
+		} else if tab.diagnostic >= len(tab.analysis.Diagnostics) {
+			tab.diagnostic = len(tab.analysis.Diagnostics) - 1
+		}
+		return m, nil
 	case logsLoadedMsg:
 		m.renderLogs(msg)
 		return m, nil
@@ -433,6 +471,16 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+enter":
 		return m.requestRun()
+	case "ctrl+shift+enter":
+		return m.requestRunScript()
+	case "ctrl+shift+f":
+		return m.formatCurrent()
+	case "f8":
+		m.navigateDiagnostic(1)
+		return nil
+	case "shift+f8":
+		m.navigateDiagnostic(-1)
+		return nil
 	case "ctrl+space", "ctrl+@":
 		if m.focus == focusEditor {
 			m.toggleSelection()
@@ -605,6 +653,7 @@ func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		if key == "esc" || key == "n" {
 			m.mode = modeWorkspace
 			m.pendingSQL = ""
+			m.pendingRunScript = false
 			return nil
 		}
 		if key == "y" || key == "!" {
@@ -612,9 +661,11 @@ func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 				tab.isTrusted = true
 			}
 			statement := m.pendingSQL
+			script := m.pendingRunScript
 			m.pendingSQL = ""
+			m.pendingRunScript = false
 			m.mode = modeWorkspace
-			return m.runStatement(statement)
+			return m.runSQL(statement, script)
 		}
 	case modeConfirmDelete:
 		if key == "y" {
@@ -716,8 +767,17 @@ func (m *Model) updateFocused(message tea.Msg) tea.Cmd {
 	}
 	switch m.focus {
 	case focusEditor:
+		before := tab.editor.Value()
 		updated, cmd := tab.editor.Update(message)
 		tab.editor = updated
+		after := tab.editor.Value()
+		if before != after {
+			if tab.document == nil {
+				tab.document = sqleditor.NewDocument(before)
+			}
+			version := tab.document.SetText(after)
+			return tea.Batch(cmd, scheduleSQLAnalysis(tab.id, version))
+		}
 		return cmd
 	case focusResults:
 		return nil
@@ -803,18 +863,41 @@ func (m *Model) requestRun() tea.Cmd {
 		m.setError(errors.New("a query is already running in this tab"))
 		return nil
 	}
-	statement, ok := selectedStatement(tab)
+	statement, base, ok := selectedStatementWithOffset(tab)
 	if !ok {
 		m.setError(errors.New("select one statement or place the cursor inside one"))
 		return nil
 	}
+	tab.lastSQLBase = base
 	tab.selection = nil
 	if sqlscan.Analyze(statement).IsRisky && !tab.isTrusted {
 		m.pendingSQL = statement
+		m.pendingRunScript = false
 		m.mode = modeConfirmQuery
 		return nil
 	}
 	return m.runStatement(statement)
+}
+
+func (m *Model) requestRunScript() tea.Cmd {
+	tab := m.currentTab()
+	if tab == nil || strings.TrimSpace(tab.editor.Value()) == "" {
+		m.setError(errors.New("open a connection tab and enter sql before running the script"))
+		return nil
+	}
+	if tab.isRunning {
+		m.setError(errors.New("a query is already running in this tab"))
+		return nil
+	}
+	script := tab.editor.Value()
+	tab.lastSQLBase = 0
+	if sqlscan.Analyze(script).IsRisky && !tab.isTrusted {
+		m.pendingSQL = script
+		m.pendingRunScript = true
+		m.mode = modeConfirmQuery
+		return nil
+	}
+	return m.runSQL(script, true)
 }
 
 func (m *Model) toggleSelection() {
@@ -836,6 +919,10 @@ func (m *Model) toggleSelection() {
 }
 
 func (m *Model) runStatement(statement string) tea.Cmd {
+	return m.runSQL(statement, false)
+}
+
+func (m *Model) runSQL(statement string, script bool) tea.Cmd {
 	tab := m.currentTab()
 	if tab == nil {
 		return nil
@@ -851,7 +938,13 @@ func (m *Model) runStatement(statement string) tea.Cmd {
 	tab.requestID++
 	tabID, requestID, connection := tab.id, tab.requestID, tab.connection
 	runQuery := func() tea.Msg {
-		result, err := m.runner.Run(ctx, connection, statement)
+		var result database.Result
+		var err error
+		if script {
+			result, err = m.runner.RunScript(ctx, connection, statement)
+		} else {
+			result, err = m.runner.Run(ctx, connection, statement)
+		}
 		layoutStarted := time.Now()
 		columnWidths := calculateResultColumnWidths(
 			result,
@@ -869,6 +962,116 @@ func (m *Model) runStatement(statement string) tea.Cmd {
 	return tea.Batch(runQuery, queryTickCmd(tabID, requestID))
 }
 
+func (m *Model) formatCurrent() tea.Cmd {
+	tab := m.currentTab()
+	if tab == nil || m.focus != focusEditor {
+		return nil
+	}
+	value := tab.editor.Value()
+	start, end := 0, len(value)
+	cursor, ok := cursorOffset(tab.editor)
+	if !ok {
+		return nil
+	}
+	selectionStart := -1
+	if tab.selection != nil && *tab.selection != cursor {
+		start, end = *tab.selection, cursor
+		if start > end {
+			start, end = end, start
+		}
+		selectionStart = start
+	} else {
+		statements := tab.analysis.Statements
+		if len(statements) == 0 {
+			statements = sqleditor.Analyze(value, dialectFor(tab.connection.Driver), 0).Statements
+		}
+		if statement, found := sqleditor.StatementAt(statements, cursor); found {
+			start, end = statement.Range.Start.Offset, statement.Range.End.Offset
+		}
+	}
+	formatter := sqleditor.Formatter{Dialect: dialectFor(tab.connection.Driver), Options: tab.format}
+	formatted, err := formatter.Format(value[start:end])
+	if err != nil {
+		tab.statusText = "Format failed: " + err.Error()
+		return nil
+	}
+	newCursor := start + mapLogicalOffset(value[start:end], formatted, cursor-start, dialectFor(tab.connection.Driver))
+	updated := value[:start] + formatted + value[end:]
+	tab.editor.SetValue(updated)
+	setEditorCursor(&tab.editor, newCursor)
+	if selectionStart >= 0 {
+		anchor := start
+		tab.selection = &anchor
+	} else {
+		tab.selection = nil
+	}
+	version := tab.document.SetText(updated)
+	tab.analysis = sqleditor.Analyze(updated, dialectFor(tab.connection.Driver), version)
+	_ = tab.document.Apply(tab.analysis)
+	tab.statusText = "SQL formatted"
+	return nil
+}
+
+func mapLogicalOffset(before, after string, offset int, dialect sqleditor.Dialect) int {
+	if offset < 0 {
+		return 0
+	}
+	if offset > len(before) {
+		offset = len(before)
+	}
+	beforeTokens, _ := (sqleditor.Lexer{Dialect: dialect}).Lex(before)
+	afterTokens, _ := (sqleditor.Lexer{Dialect: dialect}).Lex(after)
+	ordinal, within := 0, 0
+	for _, token := range beforeTokens {
+		if token.Kind == sqleditor.TokenWhitespace {
+			continue
+		}
+		if offset <= token.Range.End.Offset {
+			within = max(0, offset-token.Range.Start.Offset)
+			break
+		}
+		ordinal++
+	}
+	seen := 0
+	for _, token := range afterTokens {
+		if token.Kind == sqleditor.TokenWhitespace {
+			continue
+		}
+		if seen == ordinal {
+			return min(token.Range.Start.Offset+within, token.Range.End.Offset)
+		}
+		seen++
+	}
+	return len(after)
+}
+
+func (m *Model) navigateDiagnostic(delta int) {
+	tab := m.currentTab()
+	if tab == nil || len(tab.analysis.Diagnostics) == 0 {
+		return
+	}
+	tab.diagnostic = (tab.diagnostic + delta + len(tab.analysis.Diagnostics)) % len(tab.analysis.Diagnostics)
+	diagnostic := tab.analysis.Diagnostics[tab.diagnostic]
+	setEditorCursor(&tab.editor, diagnostic.Range.Start.Offset)
+	m.setFocus(focusEditor)
+	tab.statusText = diagnostic.String()
+}
+
+func setEditorCursor(editor *textarea.Model, offset int) {
+	position := sqleditor.PositionAt(editor.Value(), offset)
+	editor.MoveToBegin()
+	for range max(0, position.Line-1) {
+		editor.CursorDown()
+	}
+	editor.SetCursorColumn(max(0, position.Column-1))
+}
+
+func scheduleSQLAnalysis(tabID int, version uint64) tea.Cmd {
+	return tea.Tick(220*time.Millisecond, func(time.Time) tea.Msg { return sqlAnalysisDueMsg{tabID: tabID, version: version} })
+}
+
+func dialectFor(driver profile.Driver) sqleditor.Dialect { return sqleditor.ByID(string(driver)) }
+
 func (m *Model) handleQueryFinished(msg queryFinishedMsg) {
 	tab := m.tabByID(msg.tabID)
 	if tab == nil || tab.requestID != msg.requestID {
@@ -883,6 +1086,23 @@ func (m *Model) handleQueryFinished(msg queryFinishedMsg) {
 	if msg.err != nil {
 		details := database.DescribeError(msg.err, msg.result.Duration)
 		details.Message = activity.Redact(details.Message)
+		if !details.Cancelled && !details.TimedOut {
+			diagnostic := sqleditor.DatabaseDiagnostic(tab.lastSQL, sqleditor.DatabaseError{
+				Message: details.Message, Code: details.Code, Line: details.Line,
+				Column: details.Column, Position: details.Position,
+			})
+			base := tab.lastSQLBase
+			if base < 0 || base+len(tab.lastSQL) > len(tab.editor.Value()) || tab.editor.Value()[base:base+len(tab.lastSQL)] != tab.lastSQL {
+				base = strings.Index(tab.editor.Value(), tab.lastSQL)
+			}
+			if base >= 0 {
+				diagnostic.Range.Start = sqleditor.PositionAt(tab.editor.Value(), base+diagnostic.Range.Start.Offset)
+				diagnostic.Range.End = sqleditor.PositionAt(tab.editor.Value(), base+diagnostic.Range.End.Offset)
+			}
+			tab.analysis.Diagnostics = append(tab.analysis.Diagnostics, diagnostic)
+			tab.diagnostic = len(tab.analysis.Diagnostics) - 1
+			setEditorCursor(&tab.editor, diagnostic.Range.Start.Offset)
+		}
 		tab.table.SetErrorWithLayout(
 			msg.result,
 			details,
@@ -1042,7 +1262,8 @@ func (m *Model) renderWorkspace() string {
 		if m.focus == focusResults {
 			resultStyle = m.styles.focusedPanel
 		}
-		editor := editorStyle.Width(m.contentWidth() - 2).Height(editorHeight - 2).Render(tab.editor.View())
+		editorBody := m.renderSQLEditor(tab, max(10, m.contentWidth()-4), max(3, editorHeight-2))
+		editor := editorStyle.Width(m.contentWidth() - 2).Height(editorHeight - 2).Render(editorBody)
 		resultBody := tab.table.View()
 		results := resultStyle.Width(m.contentWidth() - 2).Height(resultHeight - 2).Render(resultBody)
 		mainContent = lipgloss.JoinVertical(lipgloss.Left, editor, results)
@@ -1119,9 +1340,18 @@ func (m *Model) renderStatus() string {
 	if tab := m.currentTab(); tab != nil && tab.statusText != "" {
 		status = tab.statusText
 	}
-	keys := "Tab focus  Ctrl+Enter run  Ctrl+T tab  Ctrl+L logs  F1 help"
+	keys := "Ctrl+Enter Run  Ctrl+Shift+F Format  F8 Errors"
 	if m.focus == focusResults {
 		keys = "Arrows/WASD move  Enter detail  c/C copy  f find  ? help"
+	}
+	if tab := m.currentTab(); tab != nil && m.focus == focusEditor {
+		errors := diagnosticCounts(tab.analysis.Diagnostics)[0]
+		prefix := fmt.Sprintf("%s | %s | UTF-8 | Errors: %d", dialectFor(tab.connection.Driver).DisplayName(), cursorStatus(tab), errors)
+		if len(tab.analysis.Diagnostics) > 0 {
+			current := tab.analysis.Diagnostics[min(tab.diagnostic, len(tab.analysis.Diagnostics)-1)]
+			prefix += " | " + current.Severity.String() + ": " + current.Message
+		}
+		status = prefix
 	}
 	available := max(0, m.width-utf8.RuneCountInString(keys)-5)
 	status = truncate(status, available)
@@ -1251,7 +1481,10 @@ Workspace
 
 Query
   Ctrl+Enter            run statement at cursor
+  Ctrl+Shift+Enter      run complete script
+  Ctrl+Shift+F          format selection/current statement
   Ctrl+Space            start/clear a query selection
+  F8 / Shift+F8         next / previous diagnostic
   Ctrl+C / Ctrl+G       cancel active query
 
 Results
@@ -1373,12 +1606,18 @@ func (m *Model) addTab(connection profile.Connection) {
 	editor.ShowLineNumbers = true
 	editor.SetVirtualCursor(true)
 	editor.SetValue(defaultSQL(connection.Driver))
+	document := sqleditor.NewDocument(editor.Value())
+	analysis := sqleditor.Analyze(editor.Value(), dialectFor(connection.Driver), document.Version())
+	_ = document.Apply(analysis)
 	tab := &queryTab{
 		id:         m.nextTabID,
 		connection: connection,
 		editor:     editor,
 		table:      newResultTable(connection.EffectiveMaxColumnWidth()),
 		statusText: "Ready",
+		document:   document,
+		analysis:   analysis,
+		format:     sqleditor.DefaultFormatOptions(),
 	}
 	m.nextTabID++
 	m.tabs = append(m.tabs, tab)
@@ -1671,12 +1910,23 @@ func cursorOffset(editor textarea.Model) (int, bool) {
 }
 
 func selectedStatement(tab *queryTab) (string, bool) {
+	statement, _, ok := selectedStatementWithOffset(tab)
+	return statement, ok
+}
+
+func selectedStatementWithOffset(tab *queryTab) (string, int, bool) {
 	if tab.selection == nil {
-		return statementAtCursor(tab.editor)
+		value := tab.editor.Value()
+		cursor, ok := cursorOffset(tab.editor)
+		if !ok {
+			return "", 0, false
+		}
+		span, ok := sqlscan.At(value, cursor)
+		return span.Text, span.Start, ok
 	}
 	cursor, ok := cursorOffset(tab.editor)
 	if !ok || cursor == *tab.selection {
-		return "", false
+		return "", 0, false
 	}
 	start, end := *tab.selection, cursor
 	if start > end {
@@ -1684,13 +1934,13 @@ func selectedStatement(tab *queryTab) (string, bool) {
 	}
 	value := tab.editor.Value()
 	if start < 0 || end > len(value) {
-		return "", false
+		return "", 0, false
 	}
 	spans := sqlscan.Statements(value[start:end])
 	if len(spans) != 1 {
-		return "", false
+		return "", 0, false
 	}
-	return spans[0].Text, true
+	return spans[0].Text, start + spans[0].Start, true
 }
 
 func defaultSQL(driver profile.Driver) string {

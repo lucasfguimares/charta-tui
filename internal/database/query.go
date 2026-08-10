@@ -74,7 +74,20 @@ func (r *Runner) Run(
 	if len(spans) != 1 {
 		return Result{}, errors.New("query: select exactly one sql statement")
 	}
-	statement = strings.TrimSpace(spans[0].Text)
+	return r.run(ctx, connection, strings.TrimSpace(spans[0].Text))
+}
+
+// RunScript executes the complete non-empty script. It is intentionally a
+// separate entry point so callers cannot accidentally bypass Run's one-statement
+// safety boundary. Drivers return the first available rowset for batch queries.
+func (r *Runner) RunScript(ctx context.Context, connection profile.Connection, script string) (Result, error) {
+	if len(sqlscan.Statements(script)) == 0 {
+		return Result{}, errors.New("query: script is empty")
+	}
+	return r.run(ctx, connection, strings.TrimSpace(script))
+}
+
+func (r *Runner) run(ctx context.Context, connection profile.Connection, statement string) (Result, error) {
 	analysis := sqlscan.Analyze(statement)
 	db, err := r.manager.Connection(ctx, connection)
 	if err != nil {
@@ -98,6 +111,9 @@ func (r *Runner) Run(
 		result.Duration = result.QueryDuration + result.FetchDuration
 		if result.Duration == 0 {
 			result.Duration = time.Since(started)
+			if result.Duration == 0 {
+				result.Duration = time.Nanosecond
+			}
 		}
 		return result, queryErr
 	}
