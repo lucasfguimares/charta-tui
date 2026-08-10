@@ -13,6 +13,8 @@ import (
 	"github.com/lucasfguimares/tui-db/internal/activity"
 	"github.com/lucasfguimares/tui-db/internal/database"
 	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/tui-db/internal/queryhistory"
+	"github.com/lucasfguimares/tui-db/internal/querylibrary"
 	"github.com/lucasfguimares/tui-db/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -24,9 +26,10 @@ var (
 )
 
 type options struct {
-	configPath string
-	logLevel   string
-	noKeyring  bool
+	configPath   string
+	logLevel     string
+	noKeyring    bool
+	historyLimit int
 }
 
 // NewCommand builds a fresh Cobra tree so command tests remain isolated.
@@ -46,6 +49,7 @@ func NewCommand() *cobra.Command {
 	root.Flags().StringVar(&options.configPath, "config", "", "connection profile JSON path")
 	root.Flags().StringVar(&options.logLevel, "log-level", "info", "activity log level (debug, info, warn, error)")
 	root.Flags().BoolVar(&options.noKeyring, "no-keyring", false, "keep passwords in memory for this session only")
+	root.Flags().IntVar(&options.historyLimit, "history-limit", queryhistory.DefaultLimit, "maximum retained query history entries")
 	root.AddCommand(newVersionCommand())
 	return root
 }
@@ -76,7 +80,10 @@ func run(ctx context.Context, options options) error {
 	if err != nil {
 		return err
 	}
-	configPath, logPath, err := resolvePaths(options.configPath)
+	if options.historyLimit < 1 || options.historyLimit > queryhistory.MaxLimit {
+		return fmt.Errorf("history limit must be between 1 and %d", queryhistory.MaxLimit)
+	}
+	configPath, logPath, historyPath, libraryPath, err := resolvePaths(options.configPath)
 	if err != nil {
 		return err
 	}
@@ -93,7 +100,9 @@ func run(ctx context.Context, options options) error {
 	manager := database.NewManager(secrets)
 	inspector := database.NewInspector(manager)
 	runner := database.NewRunner(manager)
-	model := tui.New(store, secrets, manager, inspector, runner, activityLog)
+	historyStore := queryhistory.NewStore(historyPath, options.historyLimit)
+	libraryStore := querylibrary.NewStore(libraryPath)
+	model := tui.New(store, secrets, manager, inspector, runner, activityLog, historyStore, libraryStore)
 
 	activityLog.Record(ctx, activity.Event{Level: slog.LevelInfo, Message: "application started"})
 	program := tea.NewProgram(
@@ -112,17 +121,21 @@ func run(ctx context.Context, options options) error {
 	return closeErr
 }
 
-func resolvePaths(configPath string) (string, string, error) {
+func resolvePaths(configPath string) (string, string, string, string, error) {
 	if configPath == "" {
 		configDir, err := os.UserConfigDir()
 		if err != nil {
-			return "", "", fmt.Errorf("finding user config directory: %w", err)
+			return "", "", "", "", fmt.Errorf("finding user config directory: %w", err)
 		}
 		configPath = filepath.Join(configDir, "tui-db", "connections.json")
 	}
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
-		return "", "", fmt.Errorf("finding user cache directory: %w", err)
+		return "", "", "", "", fmt.Errorf("finding user cache directory: %w", err)
 	}
-	return configPath, filepath.Join(cacheDir, "tui-db", "activity.jsonl"), nil
+	configDir := filepath.Dir(configPath)
+	return configPath,
+		filepath.Join(cacheDir, "tui-db", "activity.jsonl"),
+		filepath.Join(configDir, "query-history.json"),
+		filepath.Join(configDir, "sql-library.json"), nil
 }

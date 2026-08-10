@@ -21,3 +21,12 @@ func TestVersionCommand(t *testing.T) {
 		t.Fatalf("version output = %q", output.String())
 	}
 }
+
+func TestHistoryLimitValidation(t *testing.T) {
+	t.Parallel()
+	command := NewCommand()
+	command.SetArgs([]string{"--history-limit", "0"})
+	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "history limit") {
+		t.Fatalf("Execute() error = %v, want history limit validation", err)
+	}
+}

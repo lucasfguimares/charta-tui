@@ -1,14 +1,20 @@
 package tui
 
 import (
+	"context"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/lucasfguimares/tui-db/internal/activity"
 	"github.com/lucasfguimares/tui-db/internal/database"
 	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/tui-db/internal/queryhistory"
+	"github.com/lucasfguimares/tui-db/internal/querylibrary"
 	"github.com/lucasfguimares/tui-db/internal/sqleditor"
 )
 
@@ -278,6 +284,75 @@ func TestAutocompleteDiscardsStaleResults(t *testing.T) {
 	})
 	if len(tab.completion.result.Items) != 1 || tab.completion.result.Items[0].Label != "current" || tab.completion.isCalculating {
 		t.Fatalf("current completion was not applied: %#v", tab.completion)
+	}
+}
+
+func TestSnippetExpansionAndPlaceholderNavigation(t *testing.T) {
+	t.Parallel()
+	editor := textarea.New()
+	editor.SetValue("sel")
+	editor.MoveToEnd()
+	editor.Focus()
+	tab := &queryTab{id: 1, connection: profile.Connection{Driver: profile.DriverPostgres}, editor: editor, document: sqleditor.NewDocument("sel")}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0, focus: focusEditor, mode: modeWorkspace, librarySnippets: querylibrary.BuiltInSnippets()}
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	if tab.editor.Value() != "SELECT\n    ${columns}\nFROM ${table};" || len(tab.placeholders) != 2 {
+		t.Fatalf("expanded SQL = %q, placeholders = %#v", tab.editor.Value(), tab.placeholders)
+	}
+	model.handleKey(tea.KeyPressMsg{Code: 'i', Text: "id"})
+	if !strings.Contains(tab.editor.Value(), "    id\n") {
+		t.Fatalf("placeholder replacement = %q", tab.editor.Value())
+	}
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	model.handleKey(tea.KeyPressMsg{Code: 'u', Text: "users"})
+	if tab.editor.Value() != "SELECT\n    id\nFROM users;" || len(tab.placeholders) != 0 {
+		t.Fatalf("final SQL = %q, placeholders = %#v", tab.editor.Value(), tab.placeholders)
+	}
+}
+
+func TestHandleQueryFinishedPersistsHistory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	historyStore := queryhistory.NewStore(filepath.Join(dir, "history.json"), 10)
+	activityLog, err := activity.Open(filepath.Join(dir, "activity.jsonl"), slog.LevelInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = activityLog.Close() })
+	tab := &queryTab{
+		id: 1, requestID: 2, isRunning: true, startedAt: time.Now().Add(-time.Millisecond), lastSQL: "SELECT 1",
+		connection: profile.Connection{ID: "connection", Name: "Local", Driver: profile.DriverSQLite, SQLitePath: "/tmp/local.db"},
+		table:      newResultTable(20), editor: textarea.New(),
+	}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0, history: historyStore, activity: activityLog}
+	cmd := model.handleQueryFinished(queryFinishedMsg{tabID: 1, requestID: 2, result: database.Result{Rows: [][]any{{int64(1)}}, Columns: []database.ResultColumn{{Name: "value"}}}, columnWidths: []int{8}})
+	if cmd == nil {
+		t.Fatal("handleQueryFinished() did not return history command")
+	}
+	msg, ok := cmd().(historyRecordedMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("history command = %#v", msg)
+	}
+	entries, err := historyStore.List(queryhistory.Filter{})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("history entries = %#v, %v", entries, err)
+	}
+	entry := entries[0]
+	if entry.SQL != "SELECT 1" || entry.ConnectionName != "Local" || entry.Database != "local.db" || entry.Rows != 1 || entry.Status != queryhistory.StatusSuccess || entry.Duration <= 0 {
+		t.Fatalf("history entry = %#v", entry)
+	}
+	tab.requestID = 3
+	tab.isRunning = true
+	tab.startedAt = time.Now().Add(-time.Millisecond)
+	tab.lastSQL = "SELECT slow()"
+	cancelCmd := model.handleQueryFinished(queryFinishedMsg{tabID: 1, requestID: 3, result: database.Result{Duration: time.Millisecond}, err: context.Canceled})
+	cancelMsg := cancelCmd().(historyRecordedMsg)
+	if cancelMsg.err != nil {
+		t.Fatalf("cancel history error = %v", cancelMsg.err)
+	}
+	entries, err = historyStore.List(queryhistory.Filter{Status: queryhistory.StatusCancelled})
+	if err != nil || len(entries) != 1 || entries[0].Error != "query cancelled" {
+		t.Fatalf("cancelled entries = %#v, %v", entries, err)
 	}
 }
 
