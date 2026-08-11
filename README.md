@@ -1,6 +1,6 @@
-# tui-db
+# Charta TUI
 
-`tui-db` is a keyboard-driven SQL workbench for the terminal. It keeps connection management, schema exploration, query editing, results, and local activity logs in one TUI.
+`charta` is a keyboard-driven SQL workbench for the terminal. It keeps connection management, schema exploration, query editing, results, and local activity logs in one TUI.
 
 ## Features
 
