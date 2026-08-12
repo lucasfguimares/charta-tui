@@ -1,4 +1,6 @@
-.PHONY: build build-windows install test test-race test-integration lint fmt vet
+COVERAGE_THRESHOLD ?= 50.0
+
+.PHONY: build build-windows install test test-race test-integration coverage coverage-check lint lint-fmt fmt fmt-check vet security release-check ci
 
 build:
 	mkdir -p bin
@@ -20,11 +22,36 @@ test-race:
 test-integration:
 	go test -tags=integration ./...
 
+coverage:
+	go test -race -shuffle=on -covermode=atomic -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
+coverage-check: coverage
+	@total="$$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $$3); print $$3}')"; \
+	printf 'Total coverage: %s%% (required: %s%%)\n' "$$total" "$(COVERAGE_THRESHOLD)"; \
+	awk -v total="$$total" -v threshold="$(COVERAGE_THRESHOLD)" 'BEGIN { if (total + 0 < threshold + 0) exit 1 }'
+
 lint:
 	golangci-lint run ./...
+
+lint-fmt:
+	golangci-lint fmt --diff ./...
 
 fmt:
 	gofmt -w .
 
+fmt-check:
+	@files="$$(gofmt -l .)"; \
+	if [ -n "$$files" ]; then printf 'Files need gofmt:\n%s\n' "$$files"; exit 1; fi
+
 vet:
 	go vet ./...
+
+security:
+	govulncheck ./...
+
+release-check:
+	goreleaser check
+	goreleaser release --snapshot --clean
+
+ci: fmt-check vet coverage-check lint-fmt lint security release-check
