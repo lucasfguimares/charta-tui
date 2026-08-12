@@ -1,0 +1,71 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    name: Go vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Scan reachable Go code for known vulnerabilities
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
+        with:
+          go-version-file: go.mod
+          go-package: ./...
+          cache-dependency-path: go.sum
+          output-format: text
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.36.3
+        with:
+          languages: go
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.36.3
+        with:
+          category: /language:go
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Reject newly introduced vulnerable dependencies
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high

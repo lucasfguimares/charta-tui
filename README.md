@@ -236,6 +236,9 @@ The SQL safety check is deliberately conservative, but it is not a database perm
 
 ## Development
 
+The repository's GitHub Actions pipeline, release process, security model, and
+the CI/CD concepts behind them are explained in [CICD.md](CICD.md).
+
 ```sh
 make fmt
 make vet

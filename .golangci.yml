@@ -3,15 +3,65 @@ version: "2"
 linters:
   default: standard
   enable:
+    - errorlint
     - errcheck
+    - gosec
     - govet
     - ineffassign
+    - noctx
+    - nolintlint
     - staticcheck
     - unused
+    - unconvert
     - sqlclosecheck
     - bodyclose
     - misspell
     - revive
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    staticcheck:
+      checks:
+        - all
+        - -QF*
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+    rules:
+      # Close errors are generally not actionable in deferred cleanup paths.
+      - linters:
+          - errcheck
+        text: 'Error return value of `.*\.Close` is not checked'
+      # These findings are known false positives with documented constraints.
+      - linters:
+          - gosec
+        path: _test\.go
+        text: G101
+      - linters:
+          - gosec
+        path: internal/activity/log\.go
+        text: G304
+      - linters:
+          - gosec
+        path: internal/database/catalog\.go
+        text: G201
+      - linters:
+          - gosec
+        path: internal/sqleditor/(lexer|parser)\.go
+        text: G115
+      - linters:
+          - gosec
+        path: internal/tui/(column_inspector|model)\.go
+        text: G118
+      # Existing naming choices and deliberate early row closure are readable.
+      - linters:
+          - revive
+        text: 'redefines-builtin-id|unused-parameter'
+      - linters:
+          - sqlclosecheck
+        text: Close should use defer
 
 formatters:
   enable:
