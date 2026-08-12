@@ -108,4 +108,12 @@ func TestSQLiteQueryAndCatalog(t *testing.T) {
 	if columns[0].ReferenceTable != "groups" || columns[0].ReferenceColumn != "id" {
 		t.Fatalf("group_details reference = %#v", columns[0])
 	}
+	statistics, err := inspector.Statistics(ctx, connection, result.Columns[1])
+	if err != nil {
+		t.Fatalf("Statistics() error = %v", err)
+	}
+	if statistics.TotalRows != 3 || statistics.NullCount != 0 ||
+		!statistics.HasDistinctCount || statistics.DistinctCount != 1 {
+		t.Fatalf("Statistics() = %#v", statistics)
+	}
 }

@@ -24,6 +24,7 @@ func (m *Model) renderSQLEditor(tab *queryTab, width, height int) string {
 		return m.overlayAutocomplete(tab, tab.editor.View(), width, height, 0)
 	}
 	value := tab.editor.Value()
+	ghostSuffix := inlineCompletionSuffix(tab)
 	lines := strings.Split(value, "\n")
 	cursorOffset, _ := cursorOffset(tab.editor)
 	statement, hasStatement := sqleditor.StatementAt(tab.analysis.Statements, cursorOffset)
@@ -95,8 +96,26 @@ func (m *Model) renderSQLEditor(tab *queryTab, width, height int) string {
 			line = line[:available]
 			decorations = decorations[:available]
 		}
-		body := renderDecorated(line, decorations, m.styles)
-		if lineIndex == tab.editor.Line() && tab.editor.Column() >= len(line) && len(line) < available && m.focus == focusEditor {
+		body := ""
+		ghost := []rune(ghostSuffix)
+		cursorColumn := tab.editor.Column()
+		ghostBudget := available - len(line)
+		showGhost := lineIndex == tab.editor.Line() && m.focus == focusEditor && len(ghost) > 0 &&
+			cursorColumn >= 0 && cursorColumn <= len(line) && ghostBudget > 0
+		if showGhost {
+			if cursorColumn < len(decorations) {
+				decorations[cursorColumn].cursor = false
+			}
+			ghost = ghost[:min(len(ghost), ghostBudget)]
+			left := renderDecorated(line[:cursorColumn], decorations[:cursorColumn], m.styles)
+			right := renderDecorated(line[cursorColumn:], decorations[cursorColumn:], m.styles)
+			first := m.styles.completionGhost.Reverse(true).Render(string(ghost[0]))
+			rest := m.styles.completionGhost.Render(string(ghost[1:]))
+			body = left + first + rest + right
+		} else {
+			body = renderDecorated(line, decorations, m.styles)
+		}
+		if !showGhost && lineIndex == tab.editor.Line() && tab.editor.Column() >= len(line) && len(line) < available && m.focus == focusEditor {
 			body += lipgloss.NewStyle().Reverse(true).Render(" ")
 		}
 		result = append(result, gutter+body)
@@ -115,7 +134,7 @@ func (m *Model) renderSQLEditor(tab *queryTab, width, height int) string {
 }
 
 func (m *Model) overlayAutocomplete(tab *queryTab, editor string, width, height, firstLine int) string {
-	if tab == nil || !tab.completion.isOpen || width < 34 || height < 3 {
+	if tab == nil || tab.completion.mode != autocompleteList || width < 34 || height < 3 {
 		return editor
 	}
 	popupWidth := min(68, max(30, width-4))

@@ -53,6 +53,8 @@ const (
 	modeConfirmClose
 	modeConfirmQuit
 	modeCellDetail
+	modeColumnInspector
+	modeRowInspector
 	modeResultSearch
 	modeGotoRow
 	modeHistory
@@ -208,7 +210,14 @@ type autocompleteCatalogMsg struct {
 	profileID string
 	requestID uint64
 	catalog   sqleditor.Catalog
+	automatic bool
 	err       error
+}
+
+type autocompleteDueMsg struct {
+	tabID     int
+	requestID uint64
+	version   uint64
 }
 
 type autocompleteResultMsg struct {
@@ -268,34 +277,38 @@ type Model struct {
 	isStatusError bool
 	styles        styles
 
-	form                  profileForm
-	passwordInput         textinput.Model
-	resultInput           textinput.Model
-	pendingConnection     profile.Connection
-	pendingPasswordAct    passwordAction
-	pendingSQL            string
-	pendingRunScript      bool
-	pendingDeleteID       string
-	logs                  viewport.Model
-	cellDetail            viewport.Model
-	cellDetailText        string
-	autocompleteCache     map[string]*autocompleteCatalogState
-	autocompleteRequestID uint64
-	historyEntries        []queryhistory.Entry
-	historyCursor         int
-	historyFilter         queryhistory.Filter
-	historyInput          textinput.Model
-	historyPeriod         int
-	historyError          string
-	libraryFavorites      []querylibrary.Favorite
-	librarySnippets       []querylibrary.Snippet
-	libraryCursor         int
-	librarySection        int
-	librarySearch         string
-	libraryError          string
-	libraryInput          textinput.Model
-	favoriteForm          favoriteForm
-	snippetForm           snippetForm
+	form                     profileForm
+	passwordInput            textinput.Model
+	resultInput              textinput.Model
+	pendingConnection        profile.Connection
+	pendingPasswordAct       passwordAction
+	pendingSQL               string
+	pendingRunScript         bool
+	pendingDeleteID          string
+	logs                     viewport.Model
+	cellDetail               viewport.Model
+	cellDetailText           string
+	rowInspector             rowInspectorModel
+	columnInspector          columnInspectorModel
+	columnStatisticsCache    map[columnCacheKey]columnStatisticsCacheEntry
+	columnInspectorRequestID uint64
+	autocompleteCache        map[string]*autocompleteCatalogState
+	autocompleteRequestID    uint64
+	historyEntries           []queryhistory.Entry
+	historyCursor            int
+	historyFilter            queryhistory.Filter
+	historyInput             textinput.Model
+	historyPeriod            int
+	historyError             string
+	libraryFavorites         []querylibrary.Favorite
+	librarySnippets          []querylibrary.Snippet
+	libraryCursor            int
+	librarySection           int
+	librarySearch            string
+	libraryError             string
+	libraryInput             textinput.Model
+	favoriteForm             favoriteForm
+	snippetForm              snippetForm
 }
 
 // New creates the root Bubble Tea model with explicitly wired services.
@@ -323,33 +336,34 @@ func New(
 	libraryInput.SetWidth(52)
 
 	model := &Model{
-		store:             store,
-		secrets:           secrets,
-		manager:           manager,
-		inspector:         inspector,
-		runner:            runner,
-		activity:          activityLog,
-		history:           historyStore,
-		library:           libraryStore,
-		profiles:          []profile.Connection{},
-		catalog:           map[string]*catalogState{},
-		browserItems:      []browserItem{},
-		tabs:              []*queryTab{},
-		activeTab:         -1,
-		nextTabID:         1,
-		focus:             focusBrowser,
-		mode:              modeWorkspace,
-		isBrowserOpen:     true,
-		statusText:        "Loading connections…",
-		styles:            defaultStyles(),
-		passwordInput:     passwordInput,
-		resultInput:       resultInput,
-		logs:              viewport.New(),
-		cellDetail:        viewport.New(),
-		historyInput:      historyInput,
-		libraryInput:      libraryInput,
-		librarySnippets:   querylibrary.BuiltInSnippets(),
-		autocompleteCache: map[string]*autocompleteCatalogState{},
+		store:                 store,
+		secrets:               secrets,
+		manager:               manager,
+		inspector:             inspector,
+		runner:                runner,
+		activity:              activityLog,
+		history:               historyStore,
+		library:               libraryStore,
+		profiles:              []profile.Connection{},
+		catalog:               map[string]*catalogState{},
+		browserItems:          []browserItem{},
+		tabs:                  []*queryTab{},
+		activeTab:             -1,
+		nextTabID:             1,
+		focus:                 focusBrowser,
+		mode:                  modeWorkspace,
+		isBrowserOpen:         true,
+		statusText:            "Loading connections…",
+		styles:                defaultStyles(),
+		passwordInput:         passwordInput,
+		resultInput:           resultInput,
+		logs:                  viewport.New(),
+		cellDetail:            viewport.New(),
+		historyInput:          historyInput,
+		libraryInput:          libraryInput,
+		librarySnippets:       querylibrary.BuiltInSnippets(),
+		autocompleteCache:     map[string]*autocompleteCatalogState{},
+		columnStatisticsCache: map[columnCacheKey]columnStatisticsCacheEntry{},
 	}
 	return model
 }
@@ -389,12 +403,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeWorkspace
 		delete(m.catalog, msg.connection.ID)
 		delete(m.autocompleteCache, msg.connection.ID)
+		m.invalidateColumnCaches(msg.connection.ID)
 		m.statusText = fmt.Sprintf("Saved %s", msg.connection.Name)
 		m.isStatusError = false
 		return m, m.loadProfilesCmd()
 	case profileDeletedMsg:
 		delete(m.catalog, msg.profileID)
 		delete(m.autocompleteCache, msg.profileID)
+		m.invalidateColumnCaches(msg.profileID)
 		if msg.err != nil {
 			m.setError(msg.err)
 			return m, m.loadProfilesCmd()
@@ -425,6 +441,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		delete(m.catalog, msg.connection.ID)
 		delete(m.autocompleteCache, msg.connection.ID)
+		m.invalidateColumnCaches(msg.connection.ID)
 		m.rebuildBrowser()
 		m.statusText = fmt.Sprintf("Disconnected from %s", msg.connection.Name)
 		m.isStatusError = false
@@ -464,9 +481,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case autocompleteCatalogMsg:
 		return m, m.handleAutocompleteCatalog(msg)
+	case autocompleteDueMsg:
+		return m, m.handleAutocompleteDue(msg)
 	case autocompleteResultMsg:
-		m.handleAutocompleteResult(msg)
-		return m, nil
+		return m, m.handleAutocompleteResult(msg)
+	case columnMetadataLoadedMsg:
+		return m, m.handleColumnMetadataLoaded(msg)
+	case columnStatisticsLoadedMsg:
+		return m, m.handleColumnStatisticsLoaded(msg)
 	case logsLoadedMsg:
 		m.renderLogs(msg)
 		return m, nil
@@ -532,6 +554,10 @@ func (m *Model) View() tea.View {
 			content = m.renderPasswordPrompt()
 		case modeCellDetail:
 			content = m.renderCellDetail()
+		case modeColumnInspector:
+			content = m.renderColumnInspector()
+		case modeRowInspector:
+			content = m.renderRowInspector()
 		case modeResultSearch, modeGotoRow:
 			content = m.renderResultPrompt()
 		case modeHistory, modeHistorySearch:
@@ -663,8 +689,27 @@ func (m *Model) handleResultKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	switch key {
 	case "enter":
+		if tab.table.IsColumnSelected() {
+			return m.openColumnInspector(tab)
+		}
 		if _, ok := tab.table.SelectedCell(); ok {
 			m.openCellDetail(tab)
+		}
+	case "space":
+		if tab.table.IsColumnSelected() {
+			if tab.table.ToggleFrozenColumns() {
+				tab.statusText = fmt.Sprintf("%d column(s) frozen", tab.table.frozenColumnCount)
+			} else {
+				tab.statusText = "Frozen columns do not fit in the current result width"
+			}
+		}
+	case "u":
+		if tab.table.ClearFrozenColumns() {
+			tab.statusText = "Frozen columns cleared"
+		}
+	case "v":
+		if !tab.table.IsColumnSelected() {
+			m.openRowInspector(tab)
 		}
 	case "c":
 		if value, ok := tab.table.CellClipboard(); ok {
@@ -726,6 +771,35 @@ func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		updated, cmd := m.cellDetail.Update(msg)
 		m.cellDetail = updated
 		return cmd
+	case modeColumnInspector:
+		return m.handleColumnInspectorKey(msg)
+	case modeRowInspector:
+		if key == "esc" {
+			m.mode = modeWorkspace
+			return nil
+		}
+		if m.rowInspector.HandleNavigation(key) {
+			return nil
+		}
+		switch key {
+		case "enter":
+			m.rowInspector.ToggleExpanded()
+		case "c":
+			if value, ok := m.rowInspector.ValueClipboard(); ok {
+				if tab := m.currentTab(); tab != nil {
+					tab.statusText = "Row inspector value copied"
+				}
+				return tea.SetClipboard(value)
+			}
+		case "C", "shift+c":
+			if value, ok := m.rowInspector.FieldClipboard(); ok {
+				if tab := m.currentTab(); tab != nil {
+					tab.statusText = "Row inspector field copied"
+				}
+				return tea.SetClipboard(value)
+			}
+		}
+		return nil
 	case modeResultSearch, modeGotoRow:
 		if key == "esc" {
 			m.resultInput.Blur()
@@ -911,6 +985,7 @@ func (m *Model) handleBrowserKey(msg tea.KeyPressMsg) tea.Cmd {
 		if connection, ok := m.selectedProfile(); ok {
 			delete(m.catalog, connection.ID)
 			delete(m.autocompleteCache, connection.ID)
+			m.invalidateColumnCaches(connection.ID)
 			return m.loadSchemasCmd(connection)
 		}
 	case "t":
@@ -944,14 +1019,21 @@ func (m *Model) updateFocused(message tea.Msg) tea.Cmd {
 				tab.document = sqleditor.NewDocument(before)
 			}
 			version := tab.document.SetText(after)
-			if tab.completion.isOpen {
+			if tab.completion.mode == autocompleteList {
 				return tea.Batch(cmd, scheduleSQLAnalysis(tab.id, version), m.refreshAutocompleteCmd(tab))
 			}
-			return tea.Batch(cmd, scheduleSQLAnalysis(tab.id, version))
+			return tea.Batch(cmd, scheduleSQLAnalysis(tab.id, version), m.scheduleInlineAutocomplete(tab, version))
 		}
 		afterCursor, _ := cursorOffset(tab.editor)
-		if tab.completion.isOpen && beforeCursor != afterCursor {
-			return tea.Batch(cmd, m.refreshAutocompleteCmd(tab))
+		if beforeCursor != afterCursor {
+			if tab.completion.mode == autocompleteList {
+				return tea.Batch(cmd, m.refreshAutocompleteCmd(tab))
+			}
+			version := uint64(0)
+			if tab.document != nil {
+				version = tab.document.Version()
+			}
+			return tea.Batch(cmd, m.scheduleInlineAutocomplete(tab, version))
 		}
 		return cmd
 	case focusResults:
@@ -1045,6 +1127,9 @@ func (m *Model) requestRun() tea.Cmd {
 	}
 	tab.lastSQLBase = base
 	tab.selection = nil
+	if activatePlaceholders(tab, statement, base) {
+		return nil
+	}
 	if sqlscan.Analyze(statement).IsRisky && !tab.isTrusted {
 		m.pendingSQL = statement
 		m.pendingRunScript = false
@@ -1066,6 +1151,9 @@ func (m *Model) requestRunScript() tea.Cmd {
 	}
 	script := tab.editor.Value()
 	tab.lastSQLBase = 0
+	if activatePlaceholders(tab, script, 0) {
+		return nil
+	}
 	if sqlscan.Analyze(script).IsRisky && !tab.isTrusted {
 		m.pendingSQL = script
 		m.pendingRunScript = true
@@ -1312,6 +1400,14 @@ func (m *Model) handleQueryFinished(msg queryFinishedMsg) tea.Cmd {
 		tab.statusText += " (truncated)"
 	}
 	tab.table.SetResultWithLayout(msg.result, msg.columnWidths, msg.layoutDuration)
+	analysis := sqlscan.Analyze(tab.lastSQL)
+	if analysis.IsRisky {
+		m.invalidateColumnCaches(tab.connection.ID)
+	}
+	if invalidatesSchemaMetadata(tab.lastSQL) {
+		delete(m.catalog, tab.connection.ID)
+		delete(m.autocompleteCache, tab.connection.ID)
+	}
 	m.isStatusError = false
 	if m.focus == focusResults {
 		tab.table.Focus()
@@ -1543,7 +1639,10 @@ func (m *Model) renderStatus() string {
 	}
 	keys := "Ctrl+Enter Run  Ctrl+Shift+F Format  F8 Errors"
 	if m.focus == focusResults {
-		keys = "Arrows/WASD move  Enter detail  c/C copy  f find  ? help"
+		keys = "Arrows/WASD move  Enter detail  v row  c/C copy  ? help"
+		if tab := m.currentTab(); tab != nil && tab.table.IsColumnSelected() {
+			keys = "←/→ column  Enter inspect  Space freeze  u clear  ↓ rows"
+		}
 	}
 	if tab := m.currentTab(); tab != nil && m.focus == focusEditor {
 		errors := diagnosticCounts(tab.analysis.Diagnostics)[0]
@@ -1650,6 +1749,25 @@ func (m *Model) openCellDetail(tab *queryTab) {
 	m.mode = modeCellDetail
 }
 
+func (m *Model) renderRowInspector() string {
+	width := min(120, max(40, m.width-10))
+	header := m.styles.header.Render(fmt.Sprintf("Row %d", m.rowInspector.rowNumber))
+	footer := m.styles.dim.Render("↑/↓/PgUp/PgDn navigate  Enter expand  c value  C field  Esc close")
+	content := strings.Join([]string{header, "", m.rowInspector.View(m.styles), footer}, "\n")
+	return m.center(m.styles.modal.Width(width).Render(content))
+}
+
+func (m *Model) openRowInspector(tab *queryTab) {
+	columns, row, rowIndex, ok := tab.table.SelectedRow()
+	if !ok {
+		return
+	}
+	m.rowInspector = newRowInspector(columns, row, rowIndex)
+	width := min(120, max(40, m.width-10))
+	m.rowInspector.SetSize(max(20, width-6), max(3, m.height-10))
+	m.mode = modeRowInspector
+}
+
 func (m *Model) renderConfirmation() string {
 	var title, body, footer string
 	switch m.mode {
@@ -1693,11 +1811,14 @@ Query
   Ctrl+Shift+Enter      run complete script
   Ctrl+S                save current query as favorite
   Ctrl+Shift+F          format selection/current statement
-  Ctrl+Space            open SQL autocomplete
+  Type 2+ characters    show best completion as ghost text
+  Ctrl+Space            open full SQL autocomplete list
   Ctrl+Shift+Space      start/clear a query selection
-  Up/Down, Enter/Tab    navigate and accept autocomplete
+  Up/Down               navigate autocomplete list
+  Enter                 accept autocomplete
+  Space                 accept ghost text, otherwise insert a space
   Tab / Shift+Tab       expand snippet / navigate placeholders
-  Esc                   close autocomplete
+  Esc                   dismiss autocomplete until SQL/cursor changes
   F8 / Shift+F8         next / previous diagnostic
   Ctrl+C / Ctrl+G       cancel active query
 
@@ -1706,9 +1827,25 @@ Results
   PgUp / PgDn           move one result page
   Home / End            first / last column
   Ctrl+Home / Ctrl+End  first / last result
+  Up from first row     select the column header
   Enter                 open full cell detail
+  v                     open vertical row inspector
   c / Shift+C           copy cell / row
   r / f / g             rerun / find / go to row
+
+Column header
+  Left / Right          select a column
+  Enter                 open column inspector
+  Space                 freeze/unfreeze through column
+  u                     clear frozen columns
+  Down                  return to result rows
+
+Inspectors
+  Up/Down/PgUp/PgDn     navigate or scroll
+  Left/Right            previous/next column (column inspector)
+  s / r                 exact statistics / refresh
+  c / Shift+C           copy identifier or row field
+  Esc                   return to results
 
 Connections
   Enter                 connect or expand selected item
@@ -1781,6 +1918,9 @@ func (m *Model) resize() {
 	if m.cellDetailText != "" {
 		m.cellDetail.SetContent(ansi.Hardwrap(m.cellDetailText, max(20, modalWidth-6), true))
 	}
+	rowWidth := min(120, max(40, m.width-10))
+	m.rowInspector.SetSize(max(20, rowWidth-6), max(3, m.height-10))
+	m.resizeColumnInspector()
 }
 
 func (m *Model) contentWidth() int {
@@ -1902,7 +2042,7 @@ func (m *Model) cycleFocus(delta int) {
 func (m *Model) setFocus(next focus) {
 	if next != focusEditor {
 		if tab := m.currentTab(); tab != nil {
-			tab.completion.isOpen = false
+			m.closeAutocomplete(tab, false)
 		}
 	}
 	m.focus = next
@@ -2181,6 +2321,16 @@ func defaultSQL(driver profile.Driver) string {
 	default:
 		return ""
 	}
+}
+
+func invalidatesSchemaMetadata(sql string) bool {
+	for _, statement := range sqlscan.Statements(sql) {
+		switch sqlscan.Analyze(statement.Text).FirstKeyword {
+		case "CREATE", "ALTER", "DROP", "TRUNCATE", "ATTACH", "DETACH", "PRAGMA":
+			return true
+		}
+	}
+	return false
 }
 
 func catalogKey(schema, relation string) string {

@@ -10,6 +10,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/lucasfguimares/tui-db/internal/activity"
 	"github.com/lucasfguimares/tui-db/internal/database"
 	"github.com/lucasfguimares/tui-db/internal/profile"
@@ -211,8 +212,8 @@ func TestAutocompleteFiltersAndAcceptsQualifiedColumn(t *testing.T) {
 
 	cmd := model.handleKey(tea.KeyPressMsg{Code: ' ', Mod: tea.ModCtrl})
 	model.Update(cmd())
-	if !tab.completion.isOpen || len(tab.completion.result.Items) != 4 {
-		t.Fatalf("completion open=%v items=%#v", tab.completion.isOpen, tab.completion.result.Items)
+	if tab.completion.mode != autocompleteList || len(tab.completion.result.Items) != 4 {
+		t.Fatalf("completion mode=%v items=%#v", tab.completion.mode, tab.completion.result.Items)
 	}
 	model.handleKey(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	cmd = model.refreshAutocompleteCmd(tab)
@@ -220,17 +221,17 @@ func TestAutocompleteFiltersAndAcceptsQualifiedColumn(t *testing.T) {
 	if got := completionItemLabels(tab.completion.result.Items); len(got) != 1 || got[0] != "usr_nome" {
 		t.Fatalf("filtered items = %#v", got)
 	}
-	model.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
-	if tab.completion.isOpen || tab.editor.Value() != "SELECT u.usr_nome\nFROM usr AS u" {
-		t.Fatalf("accepted completion open=%v SQL=%q", tab.completion.isOpen, tab.editor.Value())
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if tab.completion.mode != autocompleteClosed || tab.editor.Value() != "SELECT u.usr_nome\nFROM usr AS u" {
+		t.Fatalf("accepted completion mode=%v SQL=%q", tab.completion.mode, tab.editor.Value())
 	}
 }
 
 func TestAutocompleteKeyboardNavigationAndRendering(t *testing.T) {
 	t.Parallel()
 
-	tab := &queryTab{connection: profile.Connection{ID: "connection-1"}, completion: autocompleteState{
-		isOpen: true,
+	tab := &queryTab{editor: textarea.New(), table: newResultTable(20), connection: profile.Connection{ID: "connection-1"}, completion: autocompleteState{
+		mode: autocompleteList,
 		result: sqleditor.CompletionResult{Items: []sqleditor.CompletionItem{
 			{Label: "usr_cod", Kind: sqleditor.CompletionColumn, SQLType: "INTEGER", IsPrimaryKey: true},
 			{Label: "usr_nome", Kind: sqleditor.CompletionColumn, SQLType: "VARCHAR", IsNullable: true, HasNullable: true},
@@ -246,14 +247,150 @@ func TestAutocompleteKeyboardNavigationAndRendering(t *testing.T) {
 		t.Fatalf("selected = %d, want 1", tab.completion.selected)
 	}
 	view := model.renderAutocomplete(tab, 58)
-	for _, text := range []string{"usr_nome", "COLUMN", "VARCHAR", "NULL", "Enter/Tab"} {
+	for _, text := range []string{"usr_nome", "COLUMN", "VARCHAR", "NULL", "Enter accept", "Tab change focus"} {
 		if !strings.Contains(view, text) {
 			t.Errorf("autocomplete render missing %q:\n%s", text, view)
 		}
 	}
 	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if tab.completion.isOpen {
+	if tab.completion.mode != autocompleteClosed {
 		t.Fatal("Esc did not close autocomplete")
+	}
+}
+
+func TestInlineAutocompleteSuggestsAndAcceptsBestItem(t *testing.T) {
+	t.Parallel()
+
+	model, tab := inlineAutocompleteTestModel("INS", len("INS"))
+	runInlineAutocomplete(model, tab)
+	if tab.completion.mode != autocompleteInline || inlineCompletionSuffix(tab) != "ERT" {
+		t.Fatalf("inline completion mode=%v suffix=%q result=%#v", tab.completion.mode, inlineCompletionSuffix(tab), tab.completion.result)
+	}
+	if tab.editor.Value() != "INS" {
+		t.Fatalf("ghost text mutated SQL to %q", tab.editor.Value())
+	}
+	if view := ansi.Strip(model.renderSQLEditor(tab, 80, 8)); !strings.Contains(view, "INSERT") {
+		t.Fatalf("rendered editor does not contain ghost completion:\n%s", view)
+	}
+
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if tab.editor.Value() != "INSERT" || tab.completion.mode != autocompleteClosed {
+		t.Fatalf("accepted SQL=%q mode=%v", tab.editor.Value(), tab.completion.mode)
+	}
+}
+
+func TestInlineAutocompleteSpaceAcceptsSuggestionOrInsertsSpace(t *testing.T) {
+	t.Parallel()
+
+	t.Run("accept suggestion", func(t *testing.T) {
+		t.Parallel()
+
+		model, tab := inlineAutocompleteTestModel("INS", len("INS"))
+		runInlineAutocomplete(model, tab)
+		model.handleKey(tea.KeyPressMsg{Code: ' ', Text: " "})
+		if tab.editor.Value() != "INSERT" || tab.completion.mode != autocompleteClosed {
+			t.Fatalf("Space with suggestion produced SQL=%q mode=%v", tab.editor.Value(), tab.completion.mode)
+		}
+	})
+
+	t.Run("insert space without suggestion", func(t *testing.T) {
+		t.Parallel()
+
+		model, tab := inlineAutocompleteTestModel("XYZ", len("XYZ"))
+		runInlineAutocomplete(model, tab)
+		if suffix := inlineCompletionSuffix(tab); suffix != "" {
+			t.Fatalf("unexpected inline suggestion %q", suffix)
+		}
+		model.handleKey(tea.KeyPressMsg{Code: ' ', Text: " "})
+		if tab.editor.Value() != "XYZ " {
+			t.Fatalf("Space without suggestion produced %q", tab.editor.Value())
+		}
+	})
+}
+
+func TestInlineAutocompleteRequiresEligiblePrefix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		sql    string
+		cursor int
+	}{
+		{name: "one character", sql: "I", cursor: 1},
+		{name: "string", sql: "'IN'", cursor: 3},
+		{name: "comment", sql: "-- IN", cursor: 5},
+		{name: "middle of token", sql: "INSERT", cursor: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			model, tab := inlineAutocompleteTestModel(test.sql, test.cursor)
+			runInlineAutocomplete(model, tab)
+			if suffix := inlineCompletionSuffix(tab); suffix != "" || tab.completion.mode != autocompleteClosed {
+				t.Fatalf("mode=%v suffix=%q result=%#v", tab.completion.mode, suffix, tab.completion.result)
+			}
+		})
+	}
+}
+
+func TestAutocompleteEnterAndTabKeepEditorNavigationContracts(t *testing.T) {
+	t.Parallel()
+
+	model, tab := inlineAutocompleteTestModel("INS", len("INS"))
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if tab.editor.Value() != "INS\n" {
+		t.Fatalf("Enter without completion produced %q, want newline", tab.editor.Value())
+	}
+
+	tab.completion.mode = autocompleteList
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	if tab.completion.mode != autocompleteClosed || model.focus != focusResults {
+		t.Fatalf("Tab left completion mode=%v focus=%v, want closed/results", tab.completion.mode, model.focus)
+	}
+}
+
+func TestInlineAutocompleteDismissalAndStaleDebounce(t *testing.T) {
+	t.Parallel()
+
+	model, tab := inlineAutocompleteTestModel("INS", len("INS"))
+	first := model.scheduleInlineAutocomplete(tab, tab.document.Version())
+	if first == nil {
+		t.Fatal("first autocomplete was not scheduled")
+	}
+	firstRequest := tab.completion.requestID
+	second := model.scheduleInlineAutocomplete(tab, tab.document.Version())
+	if second == nil || tab.completion.requestID == firstRequest {
+		t.Fatal("second autocomplete did not supersede the first")
+	}
+	if cmd := model.handleAutocompleteDue(autocompleteDueMsg{tabID: tab.id, requestID: firstRequest, version: tab.document.Version()}); cmd != nil {
+		t.Fatal("stale debounce produced a completion command")
+	}
+	runInlineAutocomplete(model, tab)
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	requestID := tab.completion.requestID
+	if cmd := model.handleAutocompleteDue(autocompleteDueMsg{tabID: tab.id, requestID: requestID, version: tab.document.Version()}); cmd != nil {
+		t.Fatal("dismissed SQL was suggested again without an edit")
+	}
+}
+
+func TestAutocompleteCatalogLoadsAutomaticallyOnceAndExplicitlyRetries(t *testing.T) {
+	t.Parallel()
+
+	connection := profile.Connection{ID: "connection-1"}
+	model := &Model{inspector: database.NewInspector(nil), autocompleteCache: map[string]*autocompleteCatalogState{}}
+	if cmd := model.startAutocompleteCatalogCmd(connection, false); cmd == nil {
+		t.Fatal("first automatic catalog load returned nil")
+	}
+	cache := model.ensureAutocompleteCache(connection.ID)
+	if !cache.autoAttempted || !cache.isLoading {
+		t.Fatalf("automatic cache state = %#v", cache)
+	}
+	cache.isLoading = false
+	if cmd := model.startAutocompleteCatalogCmd(connection, false); cmd != nil {
+		t.Fatal("automatic catalog load was attempted more than once")
+	}
+	if cmd := model.startAutocompleteCatalogCmd(connection, true); cmd == nil {
+		t.Fatal("explicit catalog load did not retry")
 	}
 }
 
@@ -269,7 +406,7 @@ func TestCompletionColumnMapsCatalogDetails(t *testing.T) {
 func TestAutocompleteDiscardsStaleResults(t *testing.T) {
 	t.Parallel()
 
-	tab := &queryTab{id: 7, completion: autocompleteState{isOpen: true, requestID: 2, isCalculating: true}}
+	tab := &queryTab{id: 7, completion: autocompleteState{mode: autocompleteList, requestID: 2, isCalculating: true}}
 	model := &Model{tabs: []*queryTab{tab}, activeTab: 0}
 	model.handleAutocompleteResult(autocompleteResultMsg{
 		tabID: 7, requestID: 1,
@@ -285,6 +422,37 @@ func TestAutocompleteDiscardsStaleResults(t *testing.T) {
 	if len(tab.completion.result.Items) != 1 || tab.completion.result.Items[0].Label != "current" || tab.completion.isCalculating {
 		t.Fatalf("current completion was not applied: %#v", tab.completion)
 	}
+}
+
+func inlineAutocompleteTestModel(sql string, cursor int) (*Model, *queryTab) {
+	editor := textarea.New()
+	editor.SetValue(sql)
+	setEditorCursor(&editor, cursor)
+	editor.Focus()
+	document := sqleditor.NewDocument(sql)
+	analysis := sqleditor.Analyze(sql, sqleditor.PostgreSQL(), document.Version())
+	_ = document.Apply(analysis)
+	tab := &queryTab{
+		id: 1, connection: profile.Connection{ID: "connection-1", Driver: profile.DriverPostgres},
+		editor: editor, table: newResultTable(20), document: document, analysis: analysis,
+	}
+	model := &Model{
+		tabs: []*queryTab{tab}, activeTab: 0, focus: focusEditor, mode: modeWorkspace,
+		autocompleteCache: map[string]*autocompleteCatalogState{"connection-1": {isLoaded: true}},
+		styles:            defaultStyles(),
+	}
+	return model, tab
+}
+
+func runInlineAutocomplete(model *Model, tab *queryTab) {
+	model.scheduleInlineAutocomplete(tab, tab.document.Version())
+	cmd := model.handleAutocompleteDue(autocompleteDueMsg{
+		tabID: tab.id, requestID: tab.completion.requestID, version: tab.document.Version(),
+	})
+	if cmd == nil {
+		return
+	}
+	model.Update(cmd())
 }
 
 func TestSnippetExpansionAndPlaceholderNavigation(t *testing.T) {
@@ -307,6 +475,90 @@ func TestSnippetExpansionAndPlaceholderNavigation(t *testing.T) {
 	model.handleKey(tea.KeyPressMsg{Code: 'u', Text: "users"})
 	if tab.editor.Value() != "SELECT\n    id\nFROM users;" || len(tab.placeholders) != 0 {
 		t.Fatalf("final SQL = %q, placeholders = %#v", tab.editor.Value(), tab.placeholders)
+	}
+}
+
+func TestFavoritePlaceholderNavigation(t *testing.T) {
+	t.Parallel()
+
+	editor := textarea.New()
+	tab := &queryTab{
+		id:         1,
+		connection: profile.Connection{Driver: profile.DriverPostgres},
+		editor:     editor,
+		document:   sqleditor.NewDocument(""),
+		table:      newResultTable(20),
+	}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0, focus: focusResults, mode: modeLibrary}
+	favorite := querylibrary.Favorite{
+		Name: "User by ID",
+		SQL:  "SELECT * FROM ${table} WHERE id = ${id};",
+	}
+
+	if cmd := model.loadFavorite(favorite, false); cmd != nil {
+		t.Fatal("loadFavorite() returned an unexpected command")
+	}
+	if model.mode != modeWorkspace || model.focus != focusEditor {
+		t.Fatalf("mode and focus = %v, %v; want workspace and editor", model.mode, model.focus)
+	}
+	if len(tab.placeholders) != 2 {
+		t.Fatalf("loaded placeholders = %#v", tab.placeholders)
+	}
+
+	model.handleKey(tea.KeyPressMsg{Code: 'u', Text: "users"})
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	model.handleKey(tea.KeyPressMsg{Code: '4', Text: "42"})
+	if tab.editor.Value() != "SELECT * FROM users WHERE id = 42;" || len(tab.placeholders) != 0 {
+		t.Fatalf("completed favorite = %q, placeholders = %#v", tab.editor.Value(), tab.placeholders)
+	}
+}
+
+func TestFavoriteRunWaitsForPlaceholderInput(t *testing.T) {
+	t.Parallel()
+
+	editor := textarea.New()
+	tab := &queryTab{
+		id:         1,
+		connection: profile.Connection{Driver: profile.DriverPostgres},
+		editor:     editor,
+		document:   sqleditor.NewDocument(""),
+		table:      newResultTable(20),
+	}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0, focus: focusEditor, mode: modeLibrary}
+	favorite := querylibrary.Favorite{Name: "User by ID", SQL: "SELECT * FROM users WHERE id = ${id};"}
+
+	if cmd := model.loadFavorite(favorite, true); cmd != nil {
+		t.Fatal("loadFavorite() started a query with unresolved placeholders")
+	}
+	if tab.isRunning || len(tab.placeholders) != 1 {
+		t.Fatalf("isRunning = %v, placeholders = %#v", tab.isRunning, tab.placeholders)
+	}
+	if tab.statusText != "Fill placeholders before running — Tab navigates" {
+		t.Fatalf("status = %q", tab.statusText)
+	}
+}
+
+func TestFavoriteWithoutPlaceholdersStillRunsImmediately(t *testing.T) {
+	t.Parallel()
+
+	tab := &queryTab{
+		id:         1,
+		connection: profile.Connection{Driver: profile.DriverPostgres},
+		editor:     textarea.New(),
+		document:   sqleditor.NewDocument(""),
+		table:      newResultTable(20),
+	}
+	model := &Model{tabs: []*queryTab{tab}, activeTab: 0, focus: focusEditor, mode: modeLibrary}
+	favorite := querylibrary.Favorite{Name: "All users", SQL: "SELECT * FROM users;"}
+
+	if cmd := model.loadFavorite(favorite, true); cmd == nil {
+		t.Fatal("loadFavorite() did not start a favorite without placeholders")
+	}
+	if !tab.isRunning {
+		t.Fatal("favorite without placeholders is not running")
+	}
+	if tab.cancel != nil {
+		tab.cancel()
 	}
 }
 
@@ -375,4 +627,28 @@ func completionItemLabels(items []sqleditor.CompletionItem) []string {
 		labels[index] = item.Label
 	}
 	return labels
+}
+
+func TestInvalidatesSchemaMetadata(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"CREATE TABLE users (id INT)",
+		"ALTER TABLE users ADD name TEXT",
+		"DROP TABLE users",
+		"TRUNCATE TABLE users",
+		"ATTACH DATABASE 'other.db' AS other",
+		"DETACH DATABASE other",
+		"PRAGMA foreign_keys = ON",
+		"SELECT 1; CREATE INDEX users_id ON users(id)",
+	} {
+		if !invalidatesSchemaMetadata(sql) {
+			t.Errorf("invalidatesSchemaMetadata(%q) = false", sql)
+		}
+	}
+	for _, sql := range []string{"SELECT * FROM users", "INSERT INTO users VALUES (1)", "UPDATE users SET id = 2"} {
+		if invalidatesSchemaMetadata(sql) {
+			t.Errorf("invalidatesSchemaMetadata(%q) = true", sql)
+		}
+	}
 }

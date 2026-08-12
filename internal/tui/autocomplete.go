@@ -16,21 +16,35 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const autocompleteVisibleItems = 8
+const (
+	autocompleteVisibleItems = 8
+	autocompleteDelay        = 120 * time.Millisecond
+)
+
+type autocompleteMode uint8
+
+const (
+	autocompleteClosed autocompleteMode = iota
+	autocompleteInline
+	autocompleteList
+)
 
 type autocompleteState struct {
-	isOpen        bool
+	mode          autocompleteMode
 	selected      int
 	result        sqleditor.CompletionResult
 	requestID     uint64
 	isCalculating bool
+	dismissedSQL  string
+	dismissedAt   int
 }
 
 type autocompleteCatalogState struct {
-	catalog   sqleditor.Catalog
-	isLoaded  bool
-	isLoading bool
-	requestID uint64
+	catalog       sqleditor.Catalog
+	isLoaded      bool
+	isLoading     bool
+	autoAttempted bool
+	requestID     uint64
 }
 
 func (m *Model) openAutocomplete() tea.Cmd {
@@ -38,27 +52,20 @@ func (m *Model) openAutocomplete() tea.Cmd {
 	if tab == nil || m.focus != focusEditor {
 		return nil
 	}
-	tab.completion.isOpen = true
+	tab.completion.mode = autocompleteList
 	tab.completion.selected = 0
+	tab.completion.dismissedSQL = ""
 	completionCmd := m.refreshAutocompleteCmd(tab)
-
-	cache := m.ensureAutocompleteCache(tab.connection.ID)
-	if cache.isLoaded || cache.isLoading || m.inspector == nil {
-		return completionCmd
-	}
-	cache.isLoading = true
-	m.autocompleteRequestID++
-	cache.requestID = m.autocompleteRequestID
-	return tea.Batch(completionCmd, m.loadAutocompleteCatalogCmd(tab.connection, cache.requestID))
+	return tea.Batch(completionCmd, m.startAutocompleteCatalogCmd(tab.connection, true))
 }
 
 func (m *Model) refreshAutocompleteCmd(tab *queryTab) tea.Cmd {
-	if tab == nil || !tab.completion.isOpen {
+	if tab == nil || tab.completion.mode == autocompleteClosed {
 		return nil
 	}
 	offset, ok := cursorOffset(tab.editor)
 	if !ok {
-		tab.completion.isOpen = false
+		m.closeAutocomplete(tab, false)
 		return nil
 	}
 	tab.completion.requestID++
@@ -77,10 +84,10 @@ func (m *Model) refreshAutocompleteCmd(tab *queryTab) tea.Cmd {
 	}
 }
 
-func (m *Model) handleAutocompleteResult(msg autocompleteResultMsg) {
+func (m *Model) handleAutocompleteResult(msg autocompleteResultMsg) tea.Cmd {
 	tab := m.tabByID(msg.tabID)
-	if tab == nil || !tab.completion.isOpen || tab.completion.requestID != msg.requestID {
-		return
+	if tab == nil || tab.completion.mode == autocompleteClosed || tab.completion.requestID != msg.requestID {
+		return nil
 	}
 	tab.completion.result = msg.result
 	tab.completion.isCalculating = false
@@ -89,17 +96,40 @@ func (m *Model) handleAutocompleteResult(msg autocompleteResultMsg) {
 	} else if tab.completion.selected >= len(tab.completion.result.Items) {
 		tab.completion.selected = len(tab.completion.result.Items) - 1
 	}
+	if tab.completion.mode != autocompleteInline {
+		return nil
+	}
+	if !m.inlineAutocompleteEligible(tab) {
+		m.closeAutocomplete(tab, false)
+		return nil
+	}
+	return m.startAutocompleteCatalogCmd(tab.connection, false)
 }
 
 func (m *Model) handleAutocompleteKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	tab := m.currentTab()
-	if tab == nil || !tab.completion.isOpen {
+	if tab == nil || tab.completion.mode == autocompleteClosed {
 		return nil, false
 	}
 	switch msg.String() {
 	case "esc":
-		tab.completion.isOpen = false
+		m.closeAutocomplete(tab, true)
 		return nil, true
+	case "ctrl+space", "ctrl+@":
+		return m.openAutocomplete(), true
+	case "tab", "shift+tab":
+		m.closeAutocomplete(tab, false)
+		return nil, false
+	}
+	if tab.completion.mode == autocompleteInline {
+		if key := msg.String(); key == "enter" || key == "space" {
+			if _, ok := inlineCompletionItem(tab); ok {
+				return m.acceptAutocomplete(tab), true
+			}
+		}
+		return nil, false
+	}
+	switch msg.String() {
 	case "up":
 		if count := len(tab.completion.result.Items); count > 0 {
 			tab.completion.selected = (tab.completion.selected - 1 + count) % count
@@ -110,37 +140,120 @@ func (m *Model) handleAutocompleteKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			tab.completion.selected = (tab.completion.selected + 1) % count
 		}
 		return nil, true
-	case "enter", "tab":
+	case "enter":
 		return m.acceptAutocomplete(tab), true
-	case "ctrl+space", "ctrl+@":
-		return m.refreshAutocompleteCmd(tab), true
 	}
 	return nil, false
 }
 
 func (m *Model) acceptAutocomplete(tab *queryTab) tea.Cmd {
-	if len(tab.completion.result.Items) == 0 {
-		tab.completion.isOpen = false
+	index := min(max(tab.completion.selected, 0), len(tab.completion.result.Items)-1)
+	if tab.completion.mode == autocompleteInline {
+		var ok bool
+		index, ok = inlineCompletionItem(tab)
+		if !ok {
+			return nil
+		}
+	} else if len(tab.completion.result.Items) == 0 {
+		m.closeAutocomplete(tab, false)
 		return nil
 	}
-	index := min(max(tab.completion.selected, 0), len(tab.completion.result.Items)-1)
 	item := tab.completion.result.Items[index]
 	start := tab.completion.result.Replace.Start.Offset
 	end := tab.completion.result.Replace.End.Offset
 	value := tab.editor.Value()
 	if start < 0 || end < start || end > len(value) {
-		tab.completion.isOpen = false
+		m.closeAutocomplete(tab, false)
 		return nil
 	}
 	updated := value[:start] + item.InsertText + value[end:]
 	tab.editor.SetValue(updated)
 	setEditorCursor(&tab.editor, start+len(item.InsertText))
-	tab.completion.isOpen = false
+	m.closeAutocomplete(tab, false)
 	if tab.document == nil {
 		tab.document = sqleditor.NewDocument(value)
 	}
 	version := tab.document.SetText(updated)
 	return scheduleSQLAnalysis(tab.id, version)
+}
+
+func (m *Model) scheduleInlineAutocomplete(tab *queryTab, version uint64) tea.Cmd {
+	if tab == nil || m.mode != modeWorkspace || m.focus != focusEditor || len(tab.placeholders) > 0 || tab.selection != nil {
+		if tab != nil {
+			m.closeAutocomplete(tab, false)
+		}
+		return nil
+	}
+	m.closeAutocomplete(tab, false)
+	requestID := tab.completion.requestID
+	return tea.Tick(autocompleteDelay, func(time.Time) tea.Msg {
+		return autocompleteDueMsg{tabID: tab.id, requestID: requestID, version: version}
+	})
+}
+
+func (m *Model) handleAutocompleteDue(msg autocompleteDueMsg) tea.Cmd {
+	tab := m.tabByID(msg.tabID)
+	if tab == nil || tab != m.currentTab() || tab.completion.requestID != msg.requestID ||
+		m.mode != modeWorkspace || m.focus != focusEditor || tab.document == nil ||
+		tab.document.Version() != msg.version || len(tab.placeholders) > 0 || tab.selection != nil {
+		return nil
+	}
+	offset, ok := cursorOffset(tab.editor)
+	if !ok || tab.completion.dismissedSQL == tab.editor.Value() && tab.completion.dismissedAt == offset {
+		return nil
+	}
+	tab.completion.mode = autocompleteInline
+	tab.completion.selected = 0
+	return m.refreshAutocompleteCmd(tab)
+}
+
+func (m *Model) closeAutocomplete(tab *queryTab, remember bool) {
+	if tab == nil {
+		return
+	}
+	if remember {
+		tab.completion.dismissedSQL = tab.editor.Value()
+		tab.completion.dismissedAt, _ = cursorOffset(tab.editor)
+	}
+	tab.completion.mode = autocompleteClosed
+	tab.completion.result = sqleditor.CompletionResult{}
+	tab.completion.isCalculating = false
+	tab.completion.selected = 0
+	tab.completion.requestID++
+}
+
+func (m *Model) inlineAutocompleteEligible(tab *queryTab) bool {
+	if tab == nil || tab.completion.mode != autocompleteInline || len([]rune(tab.completion.result.Prefix)) < 2 ||
+		tab != m.currentTab() || m.mode != modeWorkspace || m.focus != focusEditor ||
+		len(tab.placeholders) > 0 || tab.selection != nil {
+		return false
+	}
+	offset, ok := cursorOffset(tab.editor)
+	return ok && tab.completion.result.Replace.End.Offset == offset
+}
+
+func inlineCompletionItem(tab *queryTab) (int, bool) {
+	if tab == nil || tab.completion.mode != autocompleteInline {
+		return 0, false
+	}
+	prefix := []rune(tab.completion.result.Prefix)
+	for index, item := range tab.completion.result.Items {
+		insert := []rune(item.InsertText)
+		if len(insert) <= len(prefix) || !strings.EqualFold(string(insert[:len(prefix)]), string(prefix)) {
+			continue
+		}
+		return index, true
+	}
+	return 0, false
+}
+
+func inlineCompletionSuffix(tab *queryTab) string {
+	index, ok := inlineCompletionItem(tab)
+	if !ok {
+		return ""
+	}
+	prefix := []rune(tab.completion.result.Prefix)
+	return string([]rune(tab.completion.result.Items[index].InsertText)[len(prefix):])
 }
 
 func (m *Model) ensureAutocompleteCache(profileID string) *autocompleteCatalogState {
@@ -153,6 +266,20 @@ func (m *Model) ensureAutocompleteCache(profileID string) *autocompleteCatalogSt
 	state := &autocompleteCatalogState{}
 	m.autocompleteCache[profileID] = state
 	return state
+}
+
+func (m *Model) startAutocompleteCatalogCmd(connection profile.Connection, explicit bool) tea.Cmd {
+	cache := m.ensureAutocompleteCache(connection.ID)
+	if cache.isLoaded || cache.isLoading || m.inspector == nil || !explicit && cache.autoAttempted {
+		return nil
+	}
+	if !explicit {
+		cache.autoAttempted = true
+	}
+	cache.isLoading = true
+	m.autocompleteRequestID++
+	cache.requestID = m.autocompleteRequestID
+	return m.loadAutocompleteCatalogCmd(connection, cache.requestID, !explicit)
 }
 
 func (m *Model) cachedAutocompleteCatalog(connection profile.Connection) sqleditor.Catalog {
@@ -197,12 +324,12 @@ func completionColumn(column database.Column) sqleditor.ColumnMetadata {
 	}
 }
 
-func (m *Model) loadAutocompleteCatalogCmd(connection profile.Connection, requestID uint64) tea.Cmd {
+func (m *Model) loadAutocompleteCatalogCmd(connection profile.Connection, requestID uint64, automatic bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		catalog, err := m.readAutocompleteCatalog(ctx, connection)
-		return autocompleteCatalogMsg{profileID: connection.ID, requestID: requestID, catalog: catalog, err: err}
+		return autocompleteCatalogMsg{profileID: connection.ID, requestID: requestID, catalog: catalog, automatic: automatic, err: err}
 	}
 }
 
@@ -278,7 +405,7 @@ func (m *Model) handleAutocompleteCatalog(msg autocompleteCatalogMsg) tea.Cmd {
 	}
 	commands := []tea.Cmd{}
 	for _, tab := range m.tabs {
-		if tab.connection.ID == msg.profileID && tab.completion.isOpen {
+		if tab.connection.ID == msg.profileID && tab.completion.mode != autocompleteClosed {
 			commands = append(commands, m.refreshAutocompleteCmd(tab))
 		}
 	}
@@ -286,7 +413,7 @@ func (m *Model) handleAutocompleteCatalog(msg autocompleteCatalogMsg) tea.Cmd {
 }
 
 func (m *Model) renderAutocomplete(tab *queryTab, width int) string {
-	if tab == nil || !tab.completion.isOpen {
+	if tab == nil || tab.completion.mode != autocompleteList {
 		return ""
 	}
 	items := tab.completion.result.Items
@@ -309,7 +436,7 @@ func (m *Model) renderAutocomplete(tab *queryTab, width int) string {
 			lines = append(lines, m.renderAutocompleteItem(items[index], index == tab.completion.selected, width))
 		}
 	}
-	footer := "↑/↓ navigate  Enter/Tab accept  Esc close"
+	footer := "↑/↓ navigate  Enter accept  Tab change focus  Esc close"
 	if cache := m.ensureAutocompleteCache(tab.connection.ID); cache.isLoading {
 		footer = "Loading metadata…  " + footer
 	}

@@ -262,6 +262,12 @@ func Insert(value string, cursor int, snippet Snippet) (string, []Placeholder) {
 	return value[:cursor] + body + value[cursor:], placeholders
 }
 
+// FindPlaceholders returns the placeholder ranges in reusable SQL.
+func FindPlaceholders(value string) []Placeholder {
+	_, placeholders := parsePlaceholders(value, 0)
+	return placeholders
+}
+
 // BuiltInSnippets returns a fresh copy of the default SQL snippet catalog.
 func BuiltInSnippets() []Snippet {
 	return []Snippet{

@@ -163,9 +163,16 @@ func (m *Model) loadFavorite(favorite querylibrary.Favorite, run bool) tea.Cmd {
 		m.setError(fmt.Errorf("select a connection before opening this favorite"))
 		return nil
 	}
-	setTabSQL(m.currentTab(), favorite.SQL)
-	m.currentTab().statusText = "Loaded favorite " + favorite.Name
+	tab := m.currentTab()
+	placeholders := querylibrary.FindPlaceholders(favorite.SQL)
+	setTabSQLAt(tab, favorite.SQL, placeholders, len(favorite.SQL))
+	if len(placeholders) > 0 {
+		tab.statusText = "Loaded favorite " + favorite.Name + " — fill placeholders, then run"
+	} else {
+		tab.statusText = "Loaded favorite " + favorite.Name
+	}
 	m.mode = modeWorkspace
+	m.setFocus(focusEditor)
 	if run {
 		return m.requestRunScript()
 	}
@@ -476,6 +483,23 @@ func setTabSQLAt(tab *queryTab, value string, placeholders []querylibrary.Placeh
 	tab.placeholderAwaiting = len(placeholders) > 0
 }
 
+func activatePlaceholders(tab *queryTab, value string, offset int) bool {
+	placeholders := querylibrary.FindPlaceholders(value)
+	if len(placeholders) == 0 {
+		return false
+	}
+	for i := range placeholders {
+		placeholders[i].Start += offset
+		placeholders[i].End += offset
+	}
+	tab.placeholders = placeholders
+	tab.placeholderIndex = 0
+	tab.placeholderAwaiting = true
+	setEditorCursor(&tab.editor, placeholders[0].Start+2)
+	tab.statusText = "Fill placeholders before running — Tab navigates"
+	return true
+}
+
 func applyTabSQL(tab *queryTab, value string, cursor int) {
 	tab.editor.SetValue(value)
 	setEditorCursor(&tab.editor, cursor)
@@ -488,7 +512,7 @@ func applyTabSQL(tab *queryTab, value string, cursor int) {
 	tab.analysis = sqleditor.Analyze(value, dialectFor(tab.connection.Driver), version)
 	_ = tab.document.Apply(tab.analysis)
 	tab.selection = nil
-	tab.completion.isOpen = false
+	tab.completion.mode = autocompleteClosed
 }
 
 func (m *Model) handlePlaceholderKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {

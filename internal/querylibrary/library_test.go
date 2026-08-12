@@ -56,3 +56,19 @@ func TestExpandReturnsNavigablePlaceholders(t *testing.T) {
 		t.Fatalf("placeholders = %#v", placeholders)
 	}
 }
+
+func TestFindPlaceholdersReturnsEveryOccurrence(t *testing.T) {
+	t.Parallel()
+
+	value := "SELECT * FROM ${table} WHERE owner_id = ${id} OR reviewer_id = ${id}"
+	placeholders := FindPlaceholders(value)
+	if len(placeholders) != 3 {
+		t.Fatalf("FindPlaceholders() returned %d placeholders, want 3", len(placeholders))
+	}
+	wantNames := []string{"table", "id", "id"}
+	for i, placeholder := range placeholders {
+		if placeholder.Name != wantNames[i] || value[placeholder.Start:placeholder.End] != "${"+wantNames[i]+"}" {
+			t.Fatalf("FindPlaceholders()[%d] = %#v", i, placeholder)
+		}
+	}
+}
