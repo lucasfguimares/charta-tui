@@ -47,6 +47,24 @@ func TestResultTableAlignment(t *testing.T) {
 	}
 }
 
+func TestResultTableHeaderHasDistinctBackground(t *testing.T) {
+	t.Parallel()
+
+	table := newResultTable(20)
+	table.SetSize(50, 6)
+	table.SetResult(database.Result{
+		Columns: []database.ResultColumn{{Name: "id"}, {Name: "name"}},
+		Rows:    [][]any{{int64(1), "Alice"}},
+	})
+	lines := strings.Split(table.View(), "\n")
+	if len(lines) < 2 || !strings.Contains(lines[0], "48;5;24m") {
+		t.Fatalf("header has no distinct background: %q", lines[0])
+	}
+	if strings.Contains(lines[1], "48;5;24m") {
+		t.Fatalf("body row inherited header background: %q", lines[1])
+	}
+}
+
 func TestResultFormatting(t *testing.T) {
 	t.Parallel()
 
@@ -146,9 +164,9 @@ func TestResultTableNavigationKeepsCellVisible(t *testing.T) {
 	if table.cursorColumn != 11 || table.columnOffset == 0 {
 		t.Fatalf("horizontal position = cursor %d offset %d", table.cursorColumn, table.columnOffset)
 	}
-	start, end, _ := table.visibleColumns()
-	if table.cursorColumn < start || table.cursorColumn >= end {
-		t.Fatalf("selected column %d outside viewport %d..%d", table.cursorColumn, start, end)
+	layout := table.columnLayout()
+	if !layout.contains(table.cursorColumn) {
+		t.Fatalf("selected column %d outside layout %#v", table.cursorColumn, layout.columns)
 	}
 
 	table.HandleNavigation("ctrl+end")
@@ -179,6 +197,89 @@ func TestResultTableNavigationKeepsCellVisible(t *testing.T) {
 	}
 }
 
+func TestResultTableHeaderSelectionAndFrozenColumns(t *testing.T) {
+	t.Parallel()
+
+	table := newResultTable(12)
+	table.SetSize(42, 8)
+	table.SetResult(numberedResult(4, 6))
+	table.Focus()
+
+	if !table.HandleNavigation("up") || !table.IsColumnSelected() {
+		t.Fatal("Up from the first row did not select the header")
+	}
+	table.HandleNavigation("right")
+	if table.cursorColumn != 1 || !table.ToggleFrozenColumns() || table.frozenColumnCount != 2 {
+		t.Fatalf("frozen selection = column %d count %d", table.cursorColumn, table.frozenColumnCount)
+	}
+	layout := table.columnLayout()
+	if len(layout.columns) < 3 || !layout.columns[0].isFrozen || !layout.columns[1].isFrozen || !layout.columns[2].hasDivider {
+		t.Fatalf("unexpected frozen layout: %#v", layout)
+	}
+	view := ansi.Strip(table.View())
+	lines := strings.Split(view, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("result table has fewer than two lines:\n%s", view)
+	}
+	headerDivider := strings.Index(lines[0], resultFrozenDivider)
+	rowDivider := strings.Index(lines[1], resultFrozenDivider)
+	if headerDivider < 0 || rowDivider < 0 ||
+		ansi.StringWidth(lines[0][:headerDivider]) != ansi.StringWidth(lines[1][:rowDivider]) {
+		t.Fatalf("header and row divider are not synchronized:\n%s", view)
+	}
+
+	if !table.HandleNavigation("down") || table.IsColumnSelected() {
+		t.Fatal("Down from the header did not return to the result body")
+	}
+}
+
+func TestResultTableFrozenColumnsStayVisibleWhileScrollableColumnsMove(t *testing.T) {
+	t.Parallel()
+
+	table := newResultTable(10)
+	table.SetSize(40, 8)
+	table.SetResult(numberedResult(3, 8))
+	table.selectionScope = resultSelectionColumn
+	table.cursorColumn = 1
+	if !table.ToggleFrozenColumns() {
+		t.Fatal("could not freeze the first two columns")
+	}
+	for range 6 {
+		table.HandleNavigation("right")
+	}
+	layout := table.columnLayout()
+	if !layout.contains(0) || !layout.contains(1) || !layout.contains(7) {
+		t.Fatalf("frozen/selected columns are not visible: %#v", layout)
+	}
+	if layout.scrollStart <= table.frozenColumnCount {
+		t.Fatalf("scrollable offset did not move: %#v", layout)
+	}
+}
+
+func TestResultTableFrozenColumnsResetWhenResultShapeChanges(t *testing.T) {
+	t.Parallel()
+
+	table := newResultTable(12)
+	table.SetSize(50, 8)
+	result := numberedResult(2, 4)
+	table.SetResult(result)
+	table.selectionScope = resultSelectionColumn
+	table.cursorColumn = 1
+	if !table.ToggleFrozenColumns() {
+		t.Fatal("could not freeze columns")
+	}
+	table.SetResult(result)
+	if table.frozenColumnCount != 2 {
+		t.Fatalf("same result shape reset frozen count to %d", table.frozenColumnCount)
+	}
+	changed := numberedResult(2, 4)
+	changed.Columns[1].Name = "changed"
+	table.SetResult(changed)
+	if table.frozenColumnCount != 0 || table.IsColumnSelected() {
+		t.Fatalf("changed result shape preserved count=%d scope=%v", table.frozenColumnCount, table.selectionScope)
+	}
+}
+
 func TestResultTableResizePreservesSelection(t *testing.T) {
 	t.Parallel()
 
@@ -193,10 +294,30 @@ func TestResultTableResizePreservesSelection(t *testing.T) {
 		t.Fatalf("selection after resize = %d,%d, want 39,7", table.cursorRow, table.cursorColumn)
 	}
 	rowStart, rowEnd := table.visibleRowRange()
-	columnStart, columnEnd, _ := table.visibleColumns()
+	layout := table.columnLayout()
 	if table.cursorRow+1 < rowStart || table.cursorRow+1 > rowEnd ||
-		table.cursorColumn < columnStart || table.cursorColumn >= columnEnd {
+		!layout.contains(table.cursorColumn) {
 		t.Fatalf("selection is outside resized viewport")
+	}
+}
+
+func TestResultTableNarrowResizeKeepsSelectedColumnVisible(t *testing.T) {
+	t.Parallel()
+
+	table := newResultTable(20)
+	table.SetSize(100, 10)
+	table.SetResult(numberedResult(20, 8))
+	table.selectionScope = resultSelectionColumn
+	table.cursorColumn = 2
+	if !table.ToggleFrozenColumns() {
+		t.Fatal("could not freeze the first three columns")
+	}
+	table.SetSize(18, 6)
+	if !table.columnLayout().contains(table.cursorColumn) {
+		t.Fatalf("selected column %d is hidden after resize: %#v", table.cursorColumn, table.columnLayout())
+	}
+	if table.frozenColumnCount >= 3 {
+		t.Fatalf("narrow viewport retained an unusable frozen prefix of %d columns", table.frozenColumnCount)
 	}
 }
 
@@ -356,4 +477,19 @@ func numberedResult(rows, columns int) database.Result {
 		}
 	}
 	return result
+}
+
+func BenchmarkResultTableViewLargeDataset(b *testing.B) {
+	table := newResultTable(24)
+	table.SetSize(100, 24)
+	table.SetResult(numberedResult(100_000, 12))
+	table.selectionScope = resultSelectionColumn
+	table.cursorColumn = 1
+	table.ToggleFrozenColumns()
+	table.cursorColumn = 11
+	table.ensureSelectionVisible()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = table.View()
+	}
 }

@@ -33,6 +33,7 @@ type styles struct {
 	autocomplete       lipgloss.Style
 	completionSelected lipgloss.Style
 	completionMatch    lipgloss.Style
+	completionGhost    lipgloss.Style
 }
 
 func defaultStyles() styles {
@@ -70,5 +71,6 @@ func defaultStyles() styles {
 			BorderForeground(accent).Background(lipgloss.Color("235")).Padding(0, 1),
 		completionSelected: lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24")),
 		completionMatch:    lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Bold(true).Underline(true),
+		completionGhost:    lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true),
 	}
 }

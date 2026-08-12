@@ -169,10 +169,40 @@ func Complete(sql string, cursor int, dialect Dialect, catalog Catalog) Completi
 	for _, function := range functions {
 		items = append(items, CompletionItem{Label: function, InsertText: function, Kind: CompletionFunction, priority: 30})
 	}
+	atStatementStart := completionAtStatementStart(tokens, sig, replace.Start.Offset)
 	for _, keyword := range keywords {
-		items = append(items, CompletionItem{Label: keyword, InsertText: keyword, Kind: CompletionKeyword, priority: 50})
+		priority := 50
+		if atStatementStart && statementStartingKeyword(keyword) {
+			priority = 5
+		}
+		items = append(items, CompletionItem{Label: keyword, InsertText: keyword, Kind: CompletionKeyword, priority: priority})
 	}
 	return rankCompletions(replace, prefix, items)
+}
+
+func completionAtStatementStart(tokens []Token, sig []int, offset int) bool {
+	hasToken := false
+	for _, index := range sig {
+		token := tokens[index]
+		if token.Range.Start.Offset >= offset {
+			break
+		}
+		if token.Text == ";" {
+			hasToken = false
+			continue
+		}
+		hasToken = true
+	}
+	return !hasToken
+}
+
+func statementStartingKeyword(value string) bool {
+	switch strings.ToUpper(value) {
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE", "ALTER", "DROP", "MERGE", "TRUNCATE", "EXPLAIN", "DECLARE", "BEGIN", "CALL", "EXEC", "EXECUTE", "PRAGMA", "VACUUM":
+		return true
+	default:
+		return false
+	}
 }
 
 func tokenDepths(tokens []Token, sig []int) ([]int, map[int]int) {

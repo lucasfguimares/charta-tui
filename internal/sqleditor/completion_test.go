@@ -109,6 +109,15 @@ func TestCompleteReplacesIdentifierSuffixAndResolvesCorrelatedAlias(t *testing.T
 	}
 }
 
+func TestCompletePrioritizesStatementStartingKeyword(t *testing.T) {
+	t.Parallel()
+
+	result := Complete("IN", 2, ANSI(), Catalog{})
+	if len(result.Items) == 0 || result.Items[0].Label != "INSERT" {
+		t.Fatalf("Complete(\"IN\") first item = %#v, want INSERT", result.Items)
+	}
+}
+
 func testCatalog() Catalog {
 	return Catalog{DefaultSchema: "dbo", Schemas: []SchemaMetadata{
 		{Name: "dbo", Relations: []RelationMetadata{

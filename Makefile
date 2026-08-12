@@ -1,8 +1,15 @@
-.PHONY: build test test-race test-integration lint fmt vet
+.PHONY: build build-windows install test test-race test-integration lint fmt vet
 
 build:
 	mkdir -p bin
 	go build -ldflags "-X github.com/lucasfguimares/tui-db/internal/cli.version=$$(git describe --tags --always --dirty) -X github.com/lucasfguimares/tui-db/internal/cli.commit=$$(git rev-parse --short HEAD) -X github.com/lucasfguimares/tui-db/internal/cli.buildDate=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/tui-db ./cmd/tui-db
+
+build-windows:
+	mkdir -p bin
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/lucasfguimares/tui-db/internal/cli.version=$$(git describe --tags --always --dirty) -X github.com/lucasfguimares/tui-db/internal/cli.commit=$$(git rev-parse --short HEAD) -X github.com/lucasfguimares/tui-db/internal/cli.buildDate=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/charta-windows-amd64.exe ./cmd/tui-db
+
+install: build
+	./scripts/install.sh ./bin/tui-db
 
 test:
 	go test ./...
