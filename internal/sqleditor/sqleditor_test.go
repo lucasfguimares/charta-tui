@@ -42,6 +42,19 @@ func TestLexerSupportsCommentsQuotedIdentifiersAndUnicode(t *testing.T) {
 	}
 }
 
+func TestLexerSupportsTSQLTemporaryRelations(t *testing.T) {
+	t.Parallel()
+	tokens, diagnostics := (Lexer{Dialect: TSQL()}).Lex("SELECT * FROM #local JOIN ##global g ON 1 = 1;")
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	for _, name := range []string{"#local", "##global"} {
+		if !hasToken(tokens, name, TokenTable) {
+			t.Errorf("missing temporary relation %s as table", name)
+		}
+	}
+}
+
 func TestDiagnosticsForIncompleteAndUnclosedConstructs(t *testing.T) {
 	tests := []struct{ sql, message string }{
 		{"SELECT * FROM usr WHERE usr_cod =", "Expected expression after '='"},
@@ -220,6 +233,10 @@ func TestQualifyRelations(t *testing.T) {
 		{name: "update alias", sql: "UPDATE u SET name = 'x' FROM users u WHERE u.id = 1;", schema: "tenant", want: "UPDATE u SET name = 'x' FROM [tenant].users u WHERE u.id = 1;"},
 		{name: "delete alias", sql: "DELETE u FROM users u WHERE u.id = 1;", schema: "tenant", want: "DELETE u FROM [tenant].users u WHERE u.id = 1;"},
 		{name: "merge without into", sql: "MERGE users AS u USING source AS s ON s.id = u.id WHEN MATCHED THEN DELETE;", schema: "tenant", want: "MERGE [tenant].users AS u USING [tenant].source AS s ON s.id = u.id WHEN MATCHED THEN DELETE;"},
+		{name: "recursive cte", sql: "WITH tree AS (SELECT * FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.* FROM nodes n JOIN tree t ON t.id = n.parent_id) SELECT * FROM tree;", schema: "tenant", want: "WITH tree AS (SELECT * FROM [tenant].nodes WHERE parent_id IS NULL UNION ALL SELECT n.* FROM [tenant].nodes n JOIN tree t ON t.id = n.parent_id) SELECT * FROM tree;"},
+		{name: "subquery", sql: "SELECT * FROM (SELECT * FROM users) u JOIN roles r ON r.id = u.role_id;", schema: "tenant", want: "SELECT * FROM (SELECT * FROM [tenant].users) u JOIN [tenant].roles r ON r.id = u.role_id;"},
+		{name: "delimited relation", sql: "SELECT * FROM [Order Details] AS d;", schema: "tenant data", want: "SELECT * FROM [tenant data].[Order Details] AS d;"},
+		{name: "multiple statements", sql: "SELECT * FROM users; DELETE FROM audit.logs WHERE id = 1; SELECT * FROM #temporary;", schema: "tenant", want: "SELECT * FROM [tenant].users; DELETE FROM audit.logs WHERE id = 1; SELECT * FROM #temporary;"},
 		{name: "comments and strings", sql: "SELECT 'FROM usr' FROM usr -- FROM grp", schema: "my schema", want: "SELECT 'FROM usr' FROM [my schema].usr -- FROM grp"},
 		{name: "built in table function", sql: "SELECT * FROM OPENJSON(@json);", schema: "tenant", want: "SELECT * FROM OPENJSON(@json);"},
 	}
