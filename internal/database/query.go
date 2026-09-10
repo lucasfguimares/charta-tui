@@ -71,21 +71,34 @@ func (r *Runner) Run(
 	connection profile.Connection,
 	statement string,
 ) (Result, error) {
-	spans := sqlscan.Statements(statement)
-	if len(spans) != 1 {
+	statements := sqleditor.Statements(statement, dialectForConnection(connection))
+	if len(statements) != 1 {
 		return Result{}, errors.New("query: select exactly one sql statement")
 	}
-	return r.run(ctx, connection, strings.TrimSpace(spans[0].Text))
+	return r.run(ctx, connection, strings.TrimSpace(statements[0].Text))
 }
 
 // RunScript executes the complete non-empty script. It is intentionally a
 // separate entry point so callers cannot accidentally bypass Run's one-statement
 // safety boundary. Drivers return the first available rowset for batch queries.
 func (r *Runner) RunScript(ctx context.Context, connection profile.Connection, script string) (Result, error) {
-	if len(sqlscan.Statements(script)) == 0 {
+	if len(sqleditor.Statements(script, dialectForConnection(connection))) == 0 {
 		return Result{}, errors.New("query: script is empty")
 	}
 	return r.run(ctx, connection, strings.TrimSpace(script))
+}
+
+func dialectForConnection(connection profile.Connection) sqleditor.Dialect {
+	switch connection.Driver {
+	case profile.DriverPostgres:
+		return sqleditor.PostgreSQL()
+	case profile.DriverSQLServer:
+		return sqleditor.TSQL()
+	case profile.DriverSQLite:
+		return sqleditor.SQLite()
+	default:
+		return sqleditor.ANSI()
+	}
 }
 
 func (r *Runner) run(ctx context.Context, connection profile.Connection, statement string) (Result, error) {

@@ -1404,7 +1404,7 @@ func (m *Model) handleQueryFinished(msg queryFinishedMsg) tea.Cmd {
 	if analysis.IsRisky {
 		m.invalidateColumnCaches(tab.connection.ID)
 	}
-	if invalidatesSchemaMetadata(tab.lastSQL) {
+	if invalidatesSchemaMetadata(tab.lastSQL, dialectFor(tab.connection.Driver)) {
 		delete(m.catalog, tab.connection.ID)
 		delete(m.autocompleteCache, tab.connection.ID)
 	}
@@ -2251,14 +2251,14 @@ func (m *Model) loadLogsCmd() tea.Cmd {
 	}
 }
 
-func statementAtCursor(editor textarea.Model) (string, bool) {
+func statementAtCursor(editor textarea.Model, dialect sqleditor.Dialect) (string, bool) {
 	value := editor.Value()
 	offset, ok := cursorOffset(editor)
 	if !ok {
 		return "", false
 	}
-	span, ok := sqlscan.At(value, offset)
-	return span.Text, ok
+	statement, ok := sqleditor.StatementAtOffset(value, offset, dialect)
+	return statement.Text, ok
 }
 
 func cursorOffset(editor textarea.Model) (int, bool) {
@@ -2290,8 +2290,8 @@ func selectedStatementWithOffset(tab *queryTab) (string, int, bool) {
 		if !ok {
 			return "", 0, false
 		}
-		span, ok := sqlscan.At(value, cursor)
-		return span.Text, span.Start, ok
+		statement, ok := sqleditor.StatementAtOffset(value, cursor, dialectFor(tab.connection.Driver))
+		return statement.Text, statement.Range.Start.Offset, ok
 	}
 	cursor, ok := cursorOffset(tab.editor)
 	if !ok || cursor == *tab.selection {
@@ -2305,11 +2305,11 @@ func selectedStatementWithOffset(tab *queryTab) (string, int, bool) {
 	if start < 0 || end > len(value) {
 		return "", 0, false
 	}
-	spans := sqlscan.Statements(value[start:end])
-	if len(spans) != 1 {
+	statements := sqleditor.Statements(value[start:end], dialectFor(tab.connection.Driver))
+	if len(statements) != 1 {
 		return "", 0, false
 	}
-	return spans[0].Text, start + spans[0].Start, true
+	return statements[0].Text, start + statements[0].Range.Start.Offset, true
 }
 
 func defaultSQL(driver profile.Driver) string {
@@ -2323,8 +2323,8 @@ func defaultSQL(driver profile.Driver) string {
 	}
 }
 
-func invalidatesSchemaMetadata(sql string) bool {
-	for _, statement := range sqlscan.Statements(sql) {
+func invalidatesSchemaMetadata(sql string, dialect sqleditor.Dialect) bool {
+	for _, statement := range sqleditor.Statements(sql, dialect) {
 		switch sqlscan.Analyze(statement.Text).FirstKeyword {
 		case "CREATE", "ALTER", "DROP", "TRUNCATE", "ATTACH", "DETACH", "PRAGMA":
 			return true

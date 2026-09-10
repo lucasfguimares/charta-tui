@@ -86,6 +86,44 @@ func TestStatementResolverIgnoresSemicolonsInStringsAndComments(t *testing.T) {
 	}
 }
 
+func TestStatementsUsesDialectSpecificLiterals(t *testing.T) {
+	t.Parallel()
+
+	sql := `SELECT ';' AS value; -- ignored ;
+SELECT $$also ; ignored$$;
+CREATE FUNCTION f() RETURNS void AS $body$
+BEGIN
+  PERFORM 1;
+END;
+$body$ LANGUAGE plpgsql;`
+	statements := Statements(sql, PostgreSQL())
+	if len(statements) != 3 {
+		t.Fatalf("Statements() count = %d, want 3: %#v", len(statements), statements)
+	}
+	statement, ok := StatementAtOffset(sql, strings.Index(sql, "SELECT $$")+2, PostgreSQL())
+	if !ok || !strings.Contains(statement.Text, "SELECT $$") {
+		t.Fatalf("StatementAtOffset() = %#v, %v", statement, ok)
+	}
+}
+
+func FuzzStatements(f *testing.F) {
+	f.Add("SELECT 1;")
+	f.Add("SELECT ';'; -- ;\nSELECT 2")
+	f.Add("DO $$ BEGIN PERFORM 1; END $$;")
+	f.Fuzz(func(t *testing.T, input string) {
+		statements := Statements(input, PostgreSQL())
+		previousEnd := 0
+		for _, statement := range statements {
+			start := statement.Range.Start.Offset
+			end := statement.Range.End.Offset
+			if start < previousEnd || start < 0 || end > len(input) || start >= end {
+				t.Fatalf("invalid statement %#v for input length %d", statement, len(input))
+			}
+			previousEnd = end
+		}
+	})
+}
+
 func TestFormatterProducesReadableSQLAndPreservesTokens(t *testing.T) {
 	before := "select u.usr_cod,u.usr_nome from usr u left join grp g on g.grp_cod=u.usr_grp where u.usr_status='A' order by u.usr_nome;"
 	formatter := Formatter{Dialect: TSQL(), Options: DefaultFormatOptions()}
