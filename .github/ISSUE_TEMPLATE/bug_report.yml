@@ -1,0 +1,62 @@
+name: Bug report
+description: Report a reproducible problem in Charta
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Charta. Remove credentials, proprietary SQL and sensitive result data.
+  - type: input
+    id: version
+    attributes:
+      label: Charta version
+      description: Output from `charta version` or the commit SHA.
+    validations:
+      required: true
+  - type: dropdown
+    id: database
+    attributes:
+      label: Database
+      options:
+        - PostgreSQL
+        - Microsoft SQL Server
+        - SQLite
+        - Not database-specific
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, terminal application and terminal size.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List exact steps and provide sanitized SQL where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials and sensitive data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
