@@ -140,6 +140,19 @@ func (l Lexer) Lex(sql string) ([]Token, []Diagnostic) {
 				i += ss
 			}
 			emit(TokenNumber, start, startPos, i)
+		case r == '#' && d.Supports("hash_identifiers") && i+1 < len(sql) && (sql[i+1] == '#' || isASCIIIdent(sql[i+1])):
+			i += size
+			if i < len(sql) && sql[i] == '#' {
+				i++
+			}
+			for i < len(sql) {
+				rr, ss := utf8.DecodeRuneInString(sql[i:])
+				if !isIdentPart(rr) {
+					break
+				}
+				i += ss
+			}
+			emit(TokenIdentifier, start, startPos, i)
 		case isParameterStart(sql, i, d):
 			i += size
 			for i < len(sql) {
