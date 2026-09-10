@@ -368,7 +368,7 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(m.loadProfilesCmd(), m.loadLibraryCmd())
 }
 
-// Update applies input and asynchronous service results.
+// newTabForSelection opens a query tab for the selected connection.
 func (m *Model) newTabForSelection() tea.Cmd {
 	connection, ok := m.selectedProfile()
 	if !ok {
