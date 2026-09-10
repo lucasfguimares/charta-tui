@@ -11,12 +11,12 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/lucasfguimares/tui-db/internal/activity"
-	"github.com/lucasfguimares/tui-db/internal/database"
-	"github.com/lucasfguimares/tui-db/internal/profile"
-	"github.com/lucasfguimares/tui-db/internal/queryhistory"
-	"github.com/lucasfguimares/tui-db/internal/querylibrary"
-	"github.com/lucasfguimares/tui-db/internal/sqleditor"
+	"github.com/lucasfguimares/charta-tui/internal/activity"
+	"github.com/lucasfguimares/charta-tui/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/queryhistory"
+	"github.com/lucasfguimares/charta-tui/internal/querylibrary"
+	"github.com/lucasfguimares/charta-tui/internal/sqleditor"
 )
 
 func TestStatementAtCursor(t *testing.T) {

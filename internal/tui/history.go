@@ -9,10 +9,10 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/lucasfguimares/tui-db/internal/activity"
-	"github.com/lucasfguimares/tui-db/internal/database"
-	"github.com/lucasfguimares/tui-db/internal/profile"
-	"github.com/lucasfguimares/tui-db/internal/queryhistory"
+	"github.com/lucasfguimares/charta-tui/internal/activity"
+	"github.com/lucasfguimares/charta-tui/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/queryhistory"
 )
 
 func (m *Model) openHistory() tea.Cmd {

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/lucasfguimares/tui-db/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/database"
 )
 
 func TestRowInspectorFormatsNavigatesAndCopiesFields(t *testing.T) {

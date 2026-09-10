@@ -11,7 +11,7 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 	_ "github.com/ncruces/go-sqlite3/driver"
 
-	"github.com/lucasfguimares/tui-db/internal/cli"
+	"github.com/lucasfguimares/charta-tui/internal/cli"
 )
 
 func main() {

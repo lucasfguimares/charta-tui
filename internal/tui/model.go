@@ -17,13 +17,13 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/lucasfguimares/tui-db/internal/activity"
-	"github.com/lucasfguimares/tui-db/internal/database"
-	"github.com/lucasfguimares/tui-db/internal/profile"
-	"github.com/lucasfguimares/tui-db/internal/queryhistory"
-	"github.com/lucasfguimares/tui-db/internal/querylibrary"
-	"github.com/lucasfguimares/tui-db/internal/sqleditor"
-	"github.com/lucasfguimares/tui-db/internal/sqlscan"
+	"github.com/lucasfguimares/charta-tui/internal/activity"
+	"github.com/lucasfguimares/charta-tui/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/queryhistory"
+	"github.com/lucasfguimares/charta-tui/internal/querylibrary"
+	"github.com/lucasfguimares/charta-tui/internal/sqleditor"
+	"github.com/lucasfguimares/charta-tui/internal/sqlscan"
 )
 
 const (
@@ -536,7 +536,7 @@ func (m *Model) View() tea.View {
 	content := ""
 	if m.width > 0 && (m.width < minimumWidth || m.height < minimumHeight) {
 		content = m.styles.modal.Render(fmt.Sprintf(
-			"tui-db needs at least %dx%d\ncurrent terminal: %dx%d",
+			"charta needs at least %dx%d\ncurrent terminal: %dx%d",
 			minimumWidth,
 			minimumHeight,
 			m.width,
@@ -576,7 +576,7 @@ func (m *Model) View() tea.View {
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
-	view.WindowTitle = "tui-db"
+	view.WindowTitle = "charta"
 	return view
 }
 
@@ -1584,7 +1584,7 @@ func (m *Model) renderWorkspace() string {
 
 func (m *Model) renderTabs() string {
 	if len(m.tabs) == 0 {
-		return m.styles.header.Render("tui-db  SQL workbench")
+		return m.styles.header.Render("charta  SQL workbench")
 	}
 	parts := make([]string, 0, len(m.tabs))
 	for i, tab := range m.tabs {
@@ -1784,7 +1784,7 @@ func (m *Model) renderConfirmation() string {
 		body = "The editor contents and current results are not saved."
 		footer = "y close  n/Esc cancel"
 	case modeConfirmQuit:
-		title = "Quit tui-db?"
+		title = "Quit charta?"
 		body = "Open query editors are session-only and will be discarded."
 		footer = "y quit  n/Esc cancel"
 	case modeConfirmHistoryClear:

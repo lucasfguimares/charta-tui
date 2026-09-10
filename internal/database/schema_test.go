@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
 )
 
 type schemaTestSecrets struct{}

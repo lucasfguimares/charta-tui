@@ -9,8 +9,8 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/lucasfguimares/tui-db/internal/querylibrary"
-	"github.com/lucasfguimares/tui-db/internal/sqleditor"
+	"github.com/lucasfguimares/charta-tui/internal/querylibrary"
+	"github.com/lucasfguimares/charta-tui/internal/sqleditor"
 )
 
 type favoriteForm struct {

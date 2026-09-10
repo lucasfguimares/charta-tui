@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
 )
 
 // SecretReader resolves the password for a connection profile.
@@ -169,7 +169,7 @@ func (m *Manager) dataSource(connection profile.Connection) (string, string, err
 	case profile.DriverSQLServer:
 		query := url.Values{}
 		query.Set("database", connection.Database)
-		query.Set("app name", "tui-db")
+		query.Set("app name", "charta")
 		applySQLServerTLS(query, connection.TLS)
 		u := url.URL{
 			Scheme:   "sqlserver",

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/lucasfguimares/tui-db/internal/profile"
-	"github.com/lucasfguimares/tui-db/internal/sqleditor"
-	"github.com/lucasfguimares/tui-db/internal/sqlscan"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/sqleditor"
+	"github.com/lucasfguimares/charta-tui/internal/sqlscan"
 	"github.com/ncruces/go-sqlite3/driver"
 )
 

@@ -1,4 +1,4 @@
-module github.com/lucasfguimares/tui-db
+module github.com/lucasfguimares/charta-tui
 
 go 1.26.0
 
