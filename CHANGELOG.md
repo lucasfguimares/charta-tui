@@ -2,7 +2,7 @@
 
 Notable changes to Charta are documented here. The project follows [Semantic Versioning](https://semver.org/) while treating v0.x releases as public beta software.
 
-## [0.1.0] - 2026-09-09
+## [0.1.0] - 2026-09-10 (Beta)
 
 ### Added
 
