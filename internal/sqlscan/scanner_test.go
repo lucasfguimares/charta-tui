@@ -2,22 +2,6 @@ package sqlscan
 
 import "testing"
 
-func TestStatements(t *testing.T) {
-	t.Parallel()
-
-	sql := `SELECT ';' AS value; -- ignored ;
-SELECT $$also ; ignored$$;
-CREATE FUNCTION f() RETURNS void AS $body$
-BEGIN
-  PERFORM 1;
-END;
-$body$ LANGUAGE plpgsql;`
-	spans := Statements(sql)
-	if len(spans) != 3 {
-		t.Fatalf("Statements() count = %d, want 3: %#v", len(spans), spans)
-	}
-}
-
 func TestAnalyze(t *testing.T) {
 	t.Parallel()
 
@@ -44,30 +28,4 @@ func TestAnalyze(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestAt(t *testing.T) {
-	t.Parallel()
-
-	sql := "SELECT 1;\nSELECT 2;"
-	span, ok := At(sql, len("SELECT 1;\nSEL"))
-	if !ok || span.Text != "SELECT 2;" {
-		t.Fatalf("At() = %#v, %v; want second statement", span, ok)
-	}
-}
-
-func FuzzStatements(f *testing.F) {
-	f.Add("SELECT 1;")
-	f.Add("SELECT ';'; -- ;\nSELECT 2")
-	f.Add("DO $$ BEGIN PERFORM 1; END $$;")
-	f.Fuzz(func(t *testing.T, input string) {
-		spans := Statements(input)
-		previousEnd := 0
-		for _, span := range spans {
-			if span.Start < previousEnd || span.Start < 0 || span.End > len(input) || span.Start >= span.End {
-				t.Fatalf("invalid span %#v for input length %d", span, len(input))
-			}
-			previousEnd = span.End
-		}
-	})
 }

@@ -186,6 +186,29 @@ func ResolveStatements(sql string, tokens []Token) []Statement {
 	return result
 }
 
+// Statements lexes SQL with the active dialect and resolves its top-level
+// statements. Editor rendering, formatting and execution use this single
+// boundary implementation so semicolons inside dialect-specific literals are
+// handled consistently.
+func Statements(sql string, dialect Dialect) []Statement {
+	if dialect == nil {
+		dialect = ANSI()
+	}
+	tokens, _ := (Lexer{Dialect: dialect}).Lex(sql)
+	return ResolveStatements(sql, tokens)
+}
+
+// StatementAtOffset resolves the statement nearest the byte offset in SQL.
+func StatementAtOffset(sql string, offset int, dialect Dialect) (Statement, bool) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(sql) {
+		offset = len(sql)
+	}
+	return StatementAt(Statements(sql, dialect), offset)
+}
+
 func StatementAt(statements []Statement, offset int) (Statement, bool) {
 	for i, statement := range statements {
 		if offset >= statement.Range.Start.Offset && offset <= statement.Range.End.Offset {
