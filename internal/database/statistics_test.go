@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
 )
 
 func TestColumnStatisticsQueryQuotesProvenIdentifiers(t *testing.T) {

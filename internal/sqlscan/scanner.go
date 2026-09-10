@@ -6,64 +6,11 @@ import (
 	"unicode"
 )
 
-// Span identifies one statement within the original SQL string.
-type Span struct {
-	Start int
-	End   int
-	Text  string
-}
-
 // Analysis describes how a statement should be executed and guarded.
 type Analysis struct {
 	FirstKeyword string
 	IsRisky      bool
 	ReturnsRows  bool
-}
-
-// Statements returns non-empty top-level SQL statements.
-func Statements(sql string) []Span {
-	spans := []Span{}
-	masked := mask(sql)
-	start := 0
-	for i := range len(masked) {
-		if masked[i] != ';' {
-			continue
-		}
-		if span, ok := trimmedSpan(sql, start, i+1); ok {
-			spans = append(spans, span)
-		}
-		start = i + 1
-	}
-	if span, ok := trimmedSpan(sql, start, len(sql)); ok {
-		spans = append(spans, span)
-	}
-	return spans
-}
-
-// At returns the statement containing cursor, preferring the previous statement at a boundary.
-func At(sql string, cursor int) (Span, bool) {
-	if cursor < 0 {
-		cursor = 0
-	}
-	if cursor > len(sql) {
-		cursor = len(sql)
-	}
-	spans := Statements(sql)
-	for i, span := range spans {
-		if cursor >= span.Start && cursor <= span.End {
-			return span, true
-		}
-		if cursor < span.Start {
-			if i > 0 {
-				return spans[i-1], true
-			}
-			return span, true
-		}
-	}
-	if len(spans) > 0 {
-		return spans[len(spans)-1], true
-	}
-	return Span{}, false
 }
 
 // Analyze conservatively marks anything other than an unambiguous read as risky.
@@ -125,19 +72,6 @@ func Analyze(sql string) Analysis {
 		}
 	}
 	return Analysis{FirstKeyword: first, IsRisky: isRisky, ReturnsRows: returnsRows}
-}
-
-func trimmedSpan(sql string, start, end int) (Span, bool) {
-	for start < end && unicode.IsSpace(rune(sql[start])) {
-		start++
-	}
-	for end > start && unicode.IsSpace(rune(sql[end-1])) {
-		end--
-	}
-	if start == end || strings.Trim(strings.TrimSpace(sql[start:end]), ";") == "" {
-		return Span{}, false
-	}
-	return Span{Start: start, End: end, Text: sql[start:end]}, true
 }
 
 func words(masked string) []string {

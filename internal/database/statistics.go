@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
 )
 
 // ColumnStatistics contains exact counts read from a proven source relation.

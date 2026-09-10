@@ -4,14 +4,14 @@ COVERAGE_THRESHOLD ?= 50.0
 
 build:
 	mkdir -p bin
-	go build -ldflags "-X github.com/lucasfguimares/tui-db/internal/cli.version=$$(git describe --tags --always --dirty) -X github.com/lucasfguimares/tui-db/internal/cli.commit=$$(git rev-parse --short HEAD) -X github.com/lucasfguimares/tui-db/internal/cli.buildDate=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/tui-db ./cmd/tui-db
+	go build -ldflags "-X github.com/lucasfguimares/charta-tui/internal/cli.version=$$(git describe --tags --always --dirty) -X github.com/lucasfguimares/charta-tui/internal/cli.commit=$$(git rev-parse --short HEAD) -X github.com/lucasfguimares/charta-tui/internal/cli.buildDate=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/charta ./cmd/charta
 
 build-windows:
 	mkdir -p bin
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/lucasfguimares/tui-db/internal/cli.version=$$(git describe --tags --always --dirty) -X github.com/lucasfguimares/tui-db/internal/cli.commit=$$(git rev-parse --short HEAD) -X github.com/lucasfguimares/tui-db/internal/cli.buildDate=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/charta-windows-amd64.exe ./cmd/tui-db
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/lucasfguimares/charta-tui/internal/cli.version=$$(git describe --tags --always --dirty) -X github.com/lucasfguimares/charta-tui/internal/cli.commit=$$(git rev-parse --short HEAD) -X github.com/lucasfguimares/charta-tui/internal/cli.buildDate=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/charta-windows-amd64.exe ./cmd/charta
 
 install: build
-	./scripts/install.sh ./bin/tui-db
+	./scripts/install.sh ./bin/charta
 
 test:
 	go test ./...

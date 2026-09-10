@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lucasfguimares/tui-db/internal/database"
-	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
 )
 
 func TestReadAutocompleteCatalogSQLite(t *testing.T) {

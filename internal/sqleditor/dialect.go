@@ -83,7 +83,7 @@ func ANSI() Dialect { return makeDialect("ansi", "SQL", "", "", "double_quote") 
 func TSQL() Dialect {
 	return makeDialect("tsql", "T-SQL", `TOP PERCENT TIES APPLY OUTER APPLY GO EXEC EXECUTE TRY CATCH
 IDENTITY NOCOUNT NVARCHAR DATETIME2 BIT MONEY`, `GETDATE SYSDATETIME DATEPART CHARINDEX LEN SCOPE_IDENTITY OPENJSON OPENXML STRING_SPLIT`,
-		"top", "brackets", "at_parameters")
+		"top", "brackets", "at_parameters", "hash_identifiers")
 }
 func PostgreSQL() Dialect {
 	return makeDialect("postgres", "PostgreSQL", `ILIKE SIMILAR LATERAL MATERIALIZED GENERATED ALWAYS STORED

@@ -104,4 +104,4 @@ jobs:
           retention-days: 14
 
       - name: Smoke-build the CLI
-        run: go build -trimpath -o "${{ runner.temp }}/charta" ./cmd/tui-db
+        run: go build -trimpath -o "${{ runner.temp }}/charta" ./cmd/charta

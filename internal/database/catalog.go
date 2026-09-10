@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
 )
 
 // Relation is a table or view in a database schema.

@@ -1,4 +1,4 @@
-// Package cli defines the tui-db command-line interface and composition root.
+// Package cli defines the Charta command-line interface and composition root.
 package cli
 
 import (
@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/lucasfguimares/tui-db/internal/activity"
-	"github.com/lucasfguimares/tui-db/internal/database"
-	"github.com/lucasfguimares/tui-db/internal/profile"
-	"github.com/lucasfguimares/tui-db/internal/queryhistory"
-	"github.com/lucasfguimares/tui-db/internal/querylibrary"
-	"github.com/lucasfguimares/tui-db/internal/tui"
+	"github.com/lucasfguimares/charta-tui/internal/activity"
+	"github.com/lucasfguimares/charta-tui/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/queryhistory"
+	"github.com/lucasfguimares/charta-tui/internal/querylibrary"
+	"github.com/lucasfguimares/charta-tui/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +23,11 @@ var (
 	version   = "dev"
 	commit    = "unknown"
 	buildDate = "unknown"
+)
+
+const (
+	applicationDirectory       = "charta"
+	legacyApplicationDirectory = "tui-db"
 )
 
 type options struct {
@@ -36,9 +41,9 @@ type options struct {
 func NewCommand() *cobra.Command {
 	options := options{}
 	root := &cobra.Command{
-		Use:           "tui-db",
+		Use:           "charta",
 		Short:         "Interactive SQL database workbench",
-		Long:          "tui-db manages SQL connections, browses schemas, runs bounded queries, and displays local activity logs.",
+		Long:          "Charta manages SQL connections, browses schemas, runs bounded queries, and displays local activity logs.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -62,7 +67,7 @@ func newVersionCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			_, err := fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"tui-db %s\ncommit: %s\nbuilt: %s\n",
+				"charta %s\ncommit: %s\nbuilt: %s\n",
 				version,
 				commit,
 				buildDate,
@@ -122,20 +127,59 @@ func run(ctx context.Context, options options) error {
 }
 
 func resolvePaths(configPath string) (string, string, string, string, error) {
-	if configPath == "" {
-		configDir, err := os.UserConfigDir()
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("finding user config directory: %w", err)
-		}
-		configPath = filepath.Join(configDir, "tui-db", "connections.json")
-	}
+	usesDefaultConfig := configPath == ""
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("finding user cache directory: %w", err)
 	}
-	configDir := filepath.Dir(configPath)
+	if usesDefaultConfig {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("finding user config directory: %w", err)
+		}
+		configPath = filepath.Join(configDir, applicationDirectory, "connections.json")
+		if err := migrateLegacyData(configDir, cacheDir); err != nil {
+			return "", "", "", "", err
+		}
+	}
+	dataDir := filepath.Dir(configPath)
 	return configPath,
-		filepath.Join(cacheDir, "tui-db", "activity.jsonl"),
-		filepath.Join(configDir, "query-history.json"),
-		filepath.Join(configDir, "sql-library.json"), nil
+		filepath.Join(cacheDir, applicationDirectory, "activity.jsonl"),
+		filepath.Join(dataDir, "query-history.json"),
+		filepath.Join(dataDir, "sql-library.json"), nil
+}
+
+func migrateLegacyData(configDir, cacheDir string) error {
+	pairs := [][2]string{
+		{filepath.Join(configDir, legacyApplicationDirectory, "connections.json"), filepath.Join(configDir, applicationDirectory, "connections.json")},
+		{filepath.Join(configDir, legacyApplicationDirectory, "query-history.json"), filepath.Join(configDir, applicationDirectory, "query-history.json")},
+		{filepath.Join(configDir, legacyApplicationDirectory, "sql-library.json"), filepath.Join(configDir, applicationDirectory, "sql-library.json")},
+		{filepath.Join(cacheDir, legacyApplicationDirectory, "activity.jsonl"), filepath.Join(cacheDir, applicationDirectory, "activity.jsonl")},
+	}
+	for _, pair := range pairs {
+		if err := migrateLegacyFile(pair[0], pair[1]); err != nil {
+			return fmt.Errorf("migrating Charta data: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateLegacyFile(source, destination string) error {
+	if _, err := os.Stat(destination); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking destination %q: %w", destination, err)
+	}
+	if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("checking legacy file %q: %w", source, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return fmt.Errorf("creating data directory: %w", err)
+	}
+	if err := os.Rename(source, destination); err != nil {
+		return fmt.Errorf("moving %q to %q: %w", source, destination, err)
+	}
+	return nil
 }

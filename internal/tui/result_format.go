@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/lucasfguimares/tui-db/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/database"
 )
 
 type cellAlignment int

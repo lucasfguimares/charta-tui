@@ -11,12 +11,12 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/lucasfguimares/tui-db/internal/activity"
-	"github.com/lucasfguimares/tui-db/internal/database"
-	"github.com/lucasfguimares/tui-db/internal/profile"
-	"github.com/lucasfguimares/tui-db/internal/queryhistory"
-	"github.com/lucasfguimares/tui-db/internal/querylibrary"
-	"github.com/lucasfguimares/tui-db/internal/sqleditor"
+	"github.com/lucasfguimares/charta-tui/internal/activity"
+	"github.com/lucasfguimares/charta-tui/internal/database"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/queryhistory"
+	"github.com/lucasfguimares/charta-tui/internal/querylibrary"
+	"github.com/lucasfguimares/charta-tui/internal/sqleditor"
 )
 
 func TestStatementAtCursor(t *testing.T) {
@@ -25,7 +25,7 @@ func TestStatementAtCursor(t *testing.T) {
 	editor := textarea.New()
 	editor.SetValue("SELECT 1;\nSELECT 2;")
 	editor.MoveToEnd()
-	statement, ok := statementAtCursor(editor)
+	statement, ok := statementAtCursor(editor, sqleditor.PostgreSQL())
 	if !ok || statement != "SELECT 2;" {
 		t.Fatalf("statementAtCursor() = %q, %v", statement, ok)
 	}
@@ -642,12 +642,12 @@ func TestInvalidatesSchemaMetadata(t *testing.T) {
 		"PRAGMA foreign_keys = ON",
 		"SELECT 1; CREATE INDEX users_id ON users(id)",
 	} {
-		if !invalidatesSchemaMetadata(sql) {
+		if !invalidatesSchemaMetadata(sql, sqleditor.ANSI()) {
 			t.Errorf("invalidatesSchemaMetadata(%q) = false", sql)
 		}
 	}
 	for _, sql := range []string{"SELECT * FROM users", "INSERT INTO users VALUES (1)", "UPDATE users SET id = 2"} {
-		if invalidatesSchemaMetadata(sql) {
+		if invalidatesSchemaMetadata(sql, sqleditor.ANSI()) {
 			t.Errorf("invalidatesSchemaMetadata(%q) = true", sql)
 		}
 	}

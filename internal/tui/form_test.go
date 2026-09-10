@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/lucasfguimares/tui-db/internal/profile"
+	"github.com/lucasfguimares/charta-tui/internal/profile"
 )
 
 func TestProfileFormEditsDefaultSchema(t *testing.T) {

@@ -42,6 +42,19 @@ func TestLexerSupportsCommentsQuotedIdentifiersAndUnicode(t *testing.T) {
 	}
 }
 
+func TestLexerSupportsTSQLTemporaryRelations(t *testing.T) {
+	t.Parallel()
+	tokens, diagnostics := (Lexer{Dialect: TSQL()}).Lex("SELECT * FROM #local JOIN ##global g ON 1 = 1;")
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	for _, name := range []string{"#local", "##global"} {
+		if !hasToken(tokens, name, TokenTable) {
+			t.Errorf("missing temporary relation %s as table", name)
+		}
+	}
+}
+
 func TestDiagnosticsForIncompleteAndUnclosedConstructs(t *testing.T) {
 	tests := []struct{ sql, message string }{
 		{"SELECT * FROM usr WHERE usr_cod =", "Expected expression after '='"},
@@ -84,6 +97,44 @@ func TestStatementResolverIgnoresSemicolonsInStringsAndComments(t *testing.T) {
 	if !ok || !strings.Contains(second.Text, "SELECT 2") {
 		t.Fatalf("StatementAt = %#v, %v", second, ok)
 	}
+}
+
+func TestStatementsUsesDialectSpecificLiterals(t *testing.T) {
+	t.Parallel()
+
+	sql := `SELECT ';' AS value; -- ignored ;
+SELECT $$also ; ignored$$;
+CREATE FUNCTION f() RETURNS void AS $body$
+BEGIN
+  PERFORM 1;
+END;
+$body$ LANGUAGE plpgsql;`
+	statements := Statements(sql, PostgreSQL())
+	if len(statements) != 3 {
+		t.Fatalf("Statements() count = %d, want 3: %#v", len(statements), statements)
+	}
+	statement, ok := StatementAtOffset(sql, strings.Index(sql, "SELECT $$")+2, PostgreSQL())
+	if !ok || !strings.Contains(statement.Text, "SELECT $$") {
+		t.Fatalf("StatementAtOffset() = %#v, %v", statement, ok)
+	}
+}
+
+func FuzzStatements(f *testing.F) {
+	f.Add("SELECT 1;")
+	f.Add("SELECT ';'; -- ;\nSELECT 2")
+	f.Add("DO $$ BEGIN PERFORM 1; END $$;")
+	f.Fuzz(func(t *testing.T, input string) {
+		statements := Statements(input, PostgreSQL())
+		previousEnd := 0
+		for _, statement := range statements {
+			start := statement.Range.Start.Offset
+			end := statement.Range.End.Offset
+			if start < previousEnd || start < 0 || end > len(input) || start >= end {
+				t.Fatalf("invalid statement %#v for input length %d", statement, len(input))
+			}
+			previousEnd = end
+		}
+	})
 }
 
 func TestFormatterProducesReadableSQLAndPreservesTokens(t *testing.T) {
@@ -182,6 +233,10 @@ func TestQualifyRelations(t *testing.T) {
 		{name: "update alias", sql: "UPDATE u SET name = 'x' FROM users u WHERE u.id = 1;", schema: "tenant", want: "UPDATE u SET name = 'x' FROM [tenant].users u WHERE u.id = 1;"},
 		{name: "delete alias", sql: "DELETE u FROM users u WHERE u.id = 1;", schema: "tenant", want: "DELETE u FROM [tenant].users u WHERE u.id = 1;"},
 		{name: "merge without into", sql: "MERGE users AS u USING source AS s ON s.id = u.id WHEN MATCHED THEN DELETE;", schema: "tenant", want: "MERGE [tenant].users AS u USING [tenant].source AS s ON s.id = u.id WHEN MATCHED THEN DELETE;"},
+		{name: "recursive cte", sql: "WITH tree AS (SELECT * FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.* FROM nodes n JOIN tree t ON t.id = n.parent_id) SELECT * FROM tree;", schema: "tenant", want: "WITH tree AS (SELECT * FROM [tenant].nodes WHERE parent_id IS NULL UNION ALL SELECT n.* FROM [tenant].nodes n JOIN tree t ON t.id = n.parent_id) SELECT * FROM tree;"},
+		{name: "subquery", sql: "SELECT * FROM (SELECT * FROM users) u JOIN roles r ON r.id = u.role_id;", schema: "tenant", want: "SELECT * FROM (SELECT * FROM [tenant].users) u JOIN [tenant].roles r ON r.id = u.role_id;"},
+		{name: "delimited relation", sql: "SELECT * FROM [Order Details] AS d;", schema: "tenant data", want: "SELECT * FROM [tenant data].[Order Details] AS d;"},
+		{name: "multiple statements", sql: "SELECT * FROM users; DELETE FROM audit.logs WHERE id = 1; SELECT * FROM #temporary;", schema: "tenant", want: "SELECT * FROM [tenant].users; DELETE FROM audit.logs WHERE id = 1; SELECT * FROM #temporary;"},
 		{name: "comments and strings", sql: "SELECT 'FROM usr' FROM usr -- FROM grp", schema: "my schema", want: "SELECT 'FROM usr' FROM [my schema].usr -- FROM grp"},
 		{name: "built in table function", sql: "SELECT * FROM OPENJSON(@json);", schema: "tenant", want: "SELECT * FROM OPENJSON(@json);"},
 	}
