@@ -9,7 +9,7 @@
 *.dylib
 /bin/
 /dist/
-/tui-db
+/charta
 
 # Test binary, coverage, profiles, and other test artifacts
 *.test

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/lucasfguimares/tui-db/internal/sqleditor"
+	"github.com/lucasfguimares/charta-tui/internal/sqleditor"
 )
 
 type charDecoration struct {

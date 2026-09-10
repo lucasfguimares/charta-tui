@@ -4,7 +4,7 @@ project_name: charta
 
 builds:
   - id: charta
-    main: ./cmd/tui-db
+    main: ./cmd/charta
     binary: charta
     env:
       - CGO_ENABLED=0
@@ -19,9 +19,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/lucasfguimares/tui-db/internal/cli.version={{.Version}}
-      - -X github.com/lucasfguimares/tui-db/internal/cli.commit={{.Commit}}
-      - -X github.com/lucasfguimares/tui-db/internal/cli.buildDate={{.Date}}
+      - -X github.com/lucasfguimares/charta-tui/internal/cli.version={{.Version}}
+      - -X github.com/lucasfguimares/charta-tui/internal/cli.commit={{.Commit}}
+      - -X github.com/lucasfguimares/charta-tui/internal/cli.buildDate={{.Date}}
 
 archives:
   - id: charta
