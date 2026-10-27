@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -28,5 +29,17 @@ func TestHistoryLimitValidation(t *testing.T) {
 	command.SetArgs([]string{"--history-limit", "0"})
 	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "history limit") {
 		t.Fatalf("Execute() error = %v, want history limit validation", err)
+	}
+}
+
+func TestResolvePathsKeepsSessionNextToConfig(t *testing.T) {
+	t.Parallel()
+	configPath := filepath.Join(t.TempDir(), "custom", "connections.json")
+	_, _, _, _, workspacePath, err := resolvePaths(configPath)
+	if err != nil {
+		t.Fatalf("resolvePaths() error = %v", err)
+	}
+	if want := filepath.Join(filepath.Dir(configPath), "workspace.json"); workspacePath != want {
+		t.Fatalf("workspace path = %q, want %q", workspacePath, want)
 	}
 }

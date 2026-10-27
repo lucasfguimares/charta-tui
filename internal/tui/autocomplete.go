@@ -269,6 +269,9 @@ func (m *Model) ensureAutocompleteCache(profileID string) *autocompleteCatalogSt
 }
 
 func (m *Model) startAutocompleteCatalogCmd(connection profile.Connection, explicit bool) tea.Cmd {
+	if connection.ID == "" {
+		return nil
+	}
 	cache := m.ensureAutocompleteCache(connection.ID)
 	if cache.isLoaded || cache.isLoading || m.inspector == nil || !explicit && cache.autoAttempted {
 		return nil
@@ -403,6 +406,7 @@ func (m *Model) handleAutocompleteCatalog(msg autocompleteCatalogMsg) tea.Cmd {
 	} else {
 		cache.isLoaded = true
 	}
+	m.refreshExplorerFindIfOpen(msg.profileID)
 	commands := []tea.Cmd{}
 	for _, tab := range m.tabs {
 		if tab.connection.ID == msg.profileID && tab.completion.mode != autocompleteClosed {

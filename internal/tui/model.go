@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/lucasfguimares/tui-db/internal/querylibrary"
 	"github.com/lucasfguimares/tui-db/internal/sqleditor"
 	"github.com/lucasfguimares/tui-db/internal/sqlscan"
+	"github.com/lucasfguimares/tui-db/internal/workspace"
 )
 
 const (
@@ -64,6 +66,9 @@ const (
 	modeFavoriteForm
 	modeSnippetForm
 	modeConfirmHistoryClear
+	modeExplorer
+	modeExplorerFilter
+	modeExplorerFind
 )
 
 type profileRepository interface {
@@ -95,6 +100,8 @@ type queryTab struct {
 	placeholders        []querylibrary.Placeholder
 	placeholderAwaiting bool
 	placeholderIndex    int
+	isDetached          bool
+	missingConnectionID string
 }
 
 type passwordAction int
@@ -110,6 +117,7 @@ type catalogState struct {
 	expanded   map[string]bool
 	relations  map[string][]database.Relation
 	columns    map[string][]database.Column
+	details    map[string]database.RelationDetails
 }
 
 type browserKind int
@@ -128,6 +136,7 @@ type browserItem struct {
 	profileID  string
 	schema     string
 	relation   string
+	column     string
 	isExpanded bool
 }
 
@@ -162,24 +171,27 @@ type connectionDisconnectedMsg struct {
 }
 
 type schemasLoadedMsg struct {
-	profileID string
-	schemas   []string
-	err       error
+	profileID  string
+	schemas    []string
+	err        error
+	isExplorer bool
 }
 
 type relationsLoadedMsg struct {
-	profileID string
-	schema    string
-	relations []database.Relation
-	err       error
+	profileID  string
+	schema     string
+	relations  []database.Relation
+	err        error
+	isExplorer bool
 }
 
 type columnsLoadedMsg struct {
-	profileID string
-	schema    string
-	relation  string
-	columns   []database.Column
-	err       error
+	profileID  string
+	schema     string
+	relation   string
+	columns    []database.Column
+	err        error
+	isExplorer bool
 }
 
 type queryFinishedMsg struct {
@@ -260,26 +272,29 @@ type Model struct {
 	activity  *activity.Log
 	history   *queryhistory.Store
 	library   *querylibrary.Store
+	workspace *workspace.Store
 
-	profiles      []profile.Connection
-	catalog       map[string]*catalogState
-	browserItems  []browserItem
-	browserCursor int
-	tabs          []*queryTab
-	activeTab     int
-	nextTabID     int
-	focus         focus
-	mode          mode
-	isBrowserOpen bool
-	width         int
-	height        int
-	statusText    string
-	isStatusError bool
-	styles        styles
+	profiles          []profile.Connection
+	catalog           map[string]*catalogState
+	browserItems      []browserItem
+	browserCursor     int
+	tabs              []*queryTab
+	activeTab         int
+	nextTabID         int
+	focus             focus
+	mode              mode
+	isBrowserOpen     bool
+	isEditorCollapsed bool
+	width             int
+	height            int
+	statusText        string
+	isStatusError     bool
+	styles            styles
 
 	form                     profileForm
 	passwordInput            textinput.Model
 	resultInput              textinput.Model
+	resultQuery              string
 	pendingConnection        profile.Connection
 	pendingPasswordAct       passwordAction
 	pendingSQL               string
@@ -309,6 +324,13 @@ type Model struct {
 	libraryInput             textinput.Model
 	favoriteForm             favoriteForm
 	snippetForm              snippetForm
+	isProfilesLoaded         bool
+	isSessionReady           bool
+	sessionSeq               uint64
+	sessionStructure         string
+	sessionVersions          map[int]uint64
+	sessionNotice            string
+	explorer                 explorerModel
 }
 
 // New creates the root Bubble Tea model with explicitly wired services.
@@ -321,6 +343,7 @@ func New(
 	activityLog *activity.Log,
 	historyStore *queryhistory.Store,
 	libraryStore *querylibrary.Store,
+	workspaceStore *workspace.Store,
 ) *Model {
 	passwordInput := textinput.New()
 	passwordInput.Prompt = "Password: "
@@ -344,6 +367,7 @@ func New(
 		activity:              activityLog,
 		history:               historyStore,
 		library:               libraryStore,
+		workspace:             workspaceStore,
 		profiles:              []profile.Connection{},
 		catalog:               map[string]*catalogState{},
 		browserItems:          []browserItem{},
@@ -364,6 +388,7 @@ func New(
 		librarySnippets:       querylibrary.BuiltInSnippets(),
 		autocompleteCache:     map[string]*autocompleteCatalogState{},
 		columnStatisticsCache: map[columnCacheKey]columnStatisticsCacheEntry{},
+		sessionVersions:       map[int]uint64{},
 	}
 	return model
 }
@@ -373,17 +398,23 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(m.loadProfilesCmd(), m.loadLibraryCmd())
 }
 
-// Update applies input and asynchronous service results.
+// Update applies input and asynchronous service results, then persists any
+// resulting change to the session snapshot.
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	cmd := m.update(message)
+	return m, tea.Batch(cmd, m.sessionChangesCmd())
+}
+
+func (m *Model) update(message tea.Msg) tea.Cmd {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resize()
-		return m, nil
+		return nil
 	case profilesLoadedMsg:
 		if msg.err != nil {
 			m.setError(msg.err)
-			return m, nil
+			return nil
 		}
 		m.profiles = msg.profiles
 		m.syncTabConnections()
@@ -393,12 +424,26 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusText = fmt.Sprintf("%d connection(s) loaded", len(m.profiles))
 		}
-		return m, nil
+		if !m.isProfilesLoaded {
+			m.isProfilesLoaded = true
+			if m.workspace != nil {
+				return m.loadSessionCmd()
+			}
+		}
+		return nil
+	case sessionLoadedMsg:
+		m.handleSessionLoaded(msg)
+		return nil
+	case sessionSaveDueMsg:
+		return m.handleSessionSaveDue(msg)
+	case sessionSavedMsg:
+		m.handleSessionSaved(msg)
+		return nil
 	case profileSavedMsg:
 		if msg.err != nil {
 			m.mode = modeProfile
 			m.form.errorText = msg.err.Error()
-			return m, nil
+			return nil
 		}
 		m.mode = modeWorkspace
 		delete(m.catalog, msg.connection.ID)
@@ -406,38 +451,49 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.invalidateColumnCaches(msg.connection.ID)
 		m.statusText = fmt.Sprintf("Saved %s", msg.connection.Name)
 		m.isStatusError = false
-		return m, m.loadProfilesCmd()
+		return m.loadProfilesCmd()
 	case profileDeletedMsg:
 		delete(m.catalog, msg.profileID)
 		delete(m.autocompleteCache, msg.profileID)
 		m.invalidateColumnCaches(msg.profileID)
 		if msg.err != nil {
 			m.setError(msg.err)
-			return m, m.loadProfilesCmd()
+			return m.loadProfilesCmd()
 		}
 		m.statusText = "Connection deleted"
-		return m, m.loadProfilesCmd()
+		return m.loadProfilesCmd()
 	case passwordNeededMsg:
 		m.pendingConnection = msg.connection
 		m.pendingPasswordAct = msg.action
 		m.passwordInput.SetValue("")
 		m.passwordInput.Focus()
 		m.mode = modePassword
-		return m, nil
+		return nil
 	case schemasLoadedMsg:
-		return m, m.handleSchemas(msg)
+		if msg.isExplorer {
+			return m.handleExplorerSchemas(msg)
+		}
+		cmd := m.handleSchemas(msg)
+		if m.isExplorerOpen() && msg.profileID == m.explorer.profileID {
+			return tea.Batch(cmd, m.handleExplorerSchemas(msg))
+		}
+		return cmd
+	case explorerLoadDueMsg:
+		return m.handleExplorerLoadDue(msg)
+	case relationDetailsLoadedMsg:
+		return m.handleRelationDetailsLoaded(msg)
 	case connectionTestedMsg:
 		if msg.err != nil {
 			m.setError(msg.err)
-			return m, nil
+			return nil
 		}
 		m.statusText = fmt.Sprintf("Connection to %s succeeded", msg.connection.Name)
 		m.isStatusError = false
-		return m, nil
+		return nil
 	case connectionDisconnectedMsg:
 		if msg.err != nil {
 			m.setError(msg.err)
-			return m, nil
+			return nil
 		}
 		delete(m.catalog, msg.connection.ID)
 		delete(m.autocompleteCache, msg.connection.ID)
@@ -445,32 +501,38 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildBrowser()
 		m.statusText = fmt.Sprintf("Disconnected from %s", msg.connection.Name)
 		m.isStatusError = false
-		return m, nil
+		return nil
 	case relationsLoadedMsg:
-		return m, m.handleRelations(msg)
+		if msg.isExplorer {
+			return m.handleExplorerRelations(msg)
+		}
+		return m.handleRelations(msg)
 	case columnsLoadedMsg:
-		return m, m.handleColumns(msg)
+		if msg.isExplorer {
+			return m.handleExplorerColumns(msg)
+		}
+		return m.handleColumns(msg)
 	case queryFinishedMsg:
-		return m, m.handleQueryFinished(msg)
+		return m.handleQueryFinished(msg)
 	case queryTickMsg:
 		tab := m.tabByID(msg.tabID)
 		if tab == nil || !tab.isRunning || tab.requestID != msg.requestID {
-			return m, nil
+			return nil
 		}
-		return m, queryTickCmd(msg.tabID, msg.requestID)
+		return queryTickCmd(msg.tabID, msg.requestID)
 	case sqlAnalysisDueMsg:
 		tab := m.tabByID(msg.tabID)
 		if tab == nil || tab.document == nil || tab.document.Version() != msg.version {
-			return m, nil
+			return nil
 		}
 		text, dialect := tab.document.Text(), dialectFor(tab.connection.Driver)
-		return m, func() tea.Msg {
+		return func() tea.Msg {
 			return sqlAnalysisMsg{tabID: msg.tabID, result: sqleditor.Analyze(text, dialect, msg.version)}
 		}
 	case sqlAnalysisMsg:
 		tab := m.tabByID(msg.tabID)
 		if tab == nil || tab.document == nil || !tab.document.Apply(msg.result) {
-			return m, nil
+			return nil
 		}
 		tab.analysis = msg.result
 		if len(tab.analysis.Diagnostics) == 0 {
@@ -478,39 +540,39 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else if tab.diagnostic >= len(tab.analysis.Diagnostics) {
 			tab.diagnostic = len(tab.analysis.Diagnostics) - 1
 		}
-		return m, nil
+		return nil
 	case autocompleteCatalogMsg:
-		return m, m.handleAutocompleteCatalog(msg)
+		return m.handleAutocompleteCatalog(msg)
 	case autocompleteDueMsg:
-		return m, m.handleAutocompleteDue(msg)
+		return m.handleAutocompleteDue(msg)
 	case autocompleteResultMsg:
-		return m, m.handleAutocompleteResult(msg)
+		return m.handleAutocompleteResult(msg)
 	case columnMetadataLoadedMsg:
-		return m, m.handleColumnMetadataLoaded(msg)
+		return m.handleColumnMetadataLoaded(msg)
 	case columnStatisticsLoadedMsg:
-		return m, m.handleColumnStatisticsLoaded(msg)
+		return m.handleColumnStatisticsLoaded(msg)
 	case logsLoadedMsg:
 		m.renderLogs(msg)
-		return m, nil
+		return nil
 	case historyLoadedMsg:
 		m.applyHistory(msg)
-		return m, nil
+		return nil
 	case historyChangedMsg:
 		if msg.err != nil {
 			m.setError(msg.err)
-			return m, nil
+			return nil
 		}
-		return m, m.loadHistoryCmd()
+		return m.loadHistoryCmd()
 	case historyRecordedMsg:
 		if msg.err != nil {
 			if tab := m.tabByID(msg.tabID); tab != nil {
 				tab.statusText = "Saving query history failed: " + activity.Redact(msg.err.Error())
 			}
 		}
-		return m, nil
+		return nil
 	case libraryLoadedMsg:
 		m.applyLibrary(msg)
-		return m, nil
+		return nil
 	case libraryChangedMsg:
 		if msg.err != nil {
 			if m.mode == modeFavoriteForm {
@@ -520,15 +582,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.setError(msg.err)
 			}
-			return m, nil
+			return nil
 		}
 		m.mode = modeLibrary
-		return m, m.loadLibraryCmd()
+		return m.loadLibraryCmd()
 	case tea.KeyPressMsg:
-		return m, m.handleKey(msg)
+		return m.handleKey(msg)
 	}
 
-	return m, m.updateFocused(message)
+	return m.updateFocused(message)
 }
 
 // View renders the responsive workspace or current modal screen.
@@ -558,7 +620,7 @@ func (m *Model) View() tea.View {
 			content = m.renderColumnInspector()
 		case modeRowInspector:
 			content = m.renderRowInspector()
-		case modeResultSearch, modeGotoRow:
+		case modeGotoRow:
 			content = m.renderResultPrompt()
 		case modeHistory, modeHistorySearch:
 			content = m.renderHistoryScreen()
@@ -570,6 +632,8 @@ func (m *Model) View() tea.View {
 			content = m.renderSnippetForm()
 		case modeConfirmQuery, modeConfirmDelete, modeConfirmClose, modeConfirmQuit, modeConfirmHistoryClear:
 			content = m.renderConfirmation()
+		case modeExplorer, modeExplorerFilter, modeExplorerFind:
+			content = m.renderExplorer()
 		default:
 			content = m.renderWorkspace()
 		}
@@ -596,11 +660,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 
 	switch key {
 	case "ctrl+q":
-		if m.hasDirtyTabs() {
-			m.mode = modeConfirmQuit
-			return nil
-		}
-		return tea.Quit
+		return m.requestQuit()
 	case "f1", "?":
 		m.mode = modeHelp
 		return nil
@@ -611,6 +671,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.openHistory()
 	case "ctrl+shift+p":
 		return m.openLibrary()
+	case "ctrl+shift+e":
+		return m.openExplorerForWorkspace()
 	case "ctrl+s":
 		if m.focus == focusEditor {
 			m.openFavoriteForm(querylibrary.Favorite{})
@@ -623,10 +685,15 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		m.resize()
 		return nil
+	case "ctrl+o":
+		m.toggleEditorCollapsed()
+		return nil
 	case "ctrl+t":
 		return m.newTabForSelection()
 	case "ctrl+w":
 		return m.requestCloseTab()
+	case "ctrl+r":
+		return m.reassociateTab()
 	case "ctrl+pgup":
 		m.switchTab(-1)
 		return nil
@@ -727,11 +794,29 @@ func (m *Model) handleResultKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	case "f", "F", "shift+f":
 		m.resultInput.Prompt = "Find: "
-		m.resultInput.SetValue("")
+		m.resultInput.SetWidth(28)
+		m.resultInput.SetValue(m.resultQuery)
+		m.resultInput.CursorEnd()
+		tab.table.BeginSearch()
+		tab.table.SetSearchQuery(m.resultQuery)
 		m.mode = modeResultSearch
 		return m.resultInput.Focus()
+	case "n":
+		if tab.table.HasSearch() {
+			tab.table.NextMatch(1)
+		}
+	case "N", "shift+n":
+		if tab.table.HasSearch() {
+			tab.table.NextMatch(-1)
+		}
+	case "esc":
+		if tab.table.HasSearch() {
+			tab.table.ClearSearch()
+			tab.statusText = "Find cleared"
+		}
 	case "g", "G", "shift+g":
 		m.resultInput.Prompt = "Go to row: "
+		m.resultInput.SetWidth(42)
 		m.resultInput.SetValue("")
 		m.mode = modeGotoRow
 		return m.resultInput.Focus()
@@ -742,6 +827,12 @@ func (m *Model) handleResultKey(msg tea.KeyPressMsg) tea.Cmd {
 func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	switch m.mode {
+	case modeExplorer:
+		return m.handleExplorerKey(msg)
+	case modeExplorerFilter:
+		return m.handleExplorerFilterKey(msg)
+	case modeExplorerFind:
+		return m.handleExplorerFindKey(msg)
 	case modeHistory, modeHistorySearch:
 		return m.handleHistoryKey(msg)
 	case modeLibrary, modeLibrarySearch:
@@ -800,7 +891,9 @@ func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 			}
 		}
 		return nil
-	case modeResultSearch, modeGotoRow:
+	case modeResultSearch:
+		return m.handleFindKey(msg)
+	case modeGotoRow:
 		if key == "esc" {
 			m.resultInput.Blur()
 			m.mode = modeWorkspace
@@ -808,19 +901,10 @@ func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		if key == "enter" {
 			value := m.resultInput.Value()
-			currentMode := m.mode
 			m.resultInput.Blur()
 			m.mode = modeWorkspace
 			tab := m.currentTab()
 			if tab == nil {
-				return nil
-			}
-			if currentMode == modeResultSearch {
-				if tab.table.Search(value) {
-					tab.statusText = fmt.Sprintf("Found %q", value)
-				} else {
-					tab.statusText = fmt.Sprintf("No result matching %q", value)
-				}
 				return nil
 			}
 			row, err := strconv.Atoi(strings.TrimSpace(value))
@@ -919,6 +1003,7 @@ func (m *Model) handleModalKey(msg tea.KeyPressMsg) tea.Cmd {
 	case modeConfirmQuit:
 		if key == "y" {
 			m.cancelAll()
+			m.saveSessionNow()
 			return tea.Quit
 		}
 		if key == "n" || key == "esc" {
@@ -997,6 +1082,8 @@ func (m *Model) handleBrowserKey(msg tea.KeyPressMsg) tea.Cmd {
 		if connection, ok := m.selectedProfile(); ok {
 			return m.disconnectCmd(connection)
 		}
+	case "i":
+		return m.openExplorerForBrowserItem()
 	}
 	return nil
 }
@@ -1110,10 +1197,16 @@ func (m *Model) collapseBrowserItem() {
 	m.rebuildBrowser()
 }
 
+var errMissingConnection = errors.New("this tab has no connection — select a connection and press Ctrl+R")
+
 func (m *Model) requestRun() tea.Cmd {
 	tab := m.currentTab()
 	if tab == nil {
 		m.setError(errors.New("open a connection tab before running sql"))
+		return nil
+	}
+	if tab.isDetached {
+		m.setError(errMissingConnection)
 		return nil
 	}
 	if tab.isRunning {
@@ -1143,6 +1236,10 @@ func (m *Model) requestRunScript() tea.Cmd {
 	tab := m.currentTab()
 	if tab == nil || strings.TrimSpace(tab.editor.Value()) == "" {
 		m.setError(errors.New("open a connection tab and enter sql before running the script"))
+		return nil
+	}
+	if tab.isDetached {
+		m.setError(errMissingConnection)
 		return nil
 	}
 	if tab.isRunning {
@@ -1532,7 +1629,7 @@ func (m *Model) rebuildBrowser() {
 					}
 					items = append(items, browserItem{
 						kind: browserColumn, level: 3, label: label, profileID: connection.ID,
-						schema: schema, relation: relation.Name,
+						schema: schema, relation: relation.Name, column: column.Name,
 					})
 				}
 			}
@@ -1549,8 +1646,7 @@ func (m *Model) renderWorkspace() string {
 	contentHeight := max(8, m.height-5)
 	mainContent := ""
 	if tab := m.currentTab(); tab != nil {
-		editorHeight := max(5, contentHeight/2)
-		resultHeight := max(4, contentHeight-editorHeight)
+		editorHeight, resultHeight := m.workspacePanelHeights(contentHeight)
 		editorStyle := m.styles.panel
 		resultStyle := m.styles.panel
 		if m.focus == focusEditor {
@@ -1559,11 +1655,18 @@ func (m *Model) renderWorkspace() string {
 		if m.focus == focusResults {
 			resultStyle = m.styles.focusedPanel
 		}
-		editorBody := m.renderSQLEditor(tab, max(10, m.contentWidth()-4), max(3, editorHeight-2))
-		editor := editorStyle.Width(m.contentWidth() - 2).Height(editorHeight - 2).Render(editorBody)
 		resultBody := tab.table.View()
+		if m.mode == modeResultSearch {
+			resultBody = tab.table.ViewWithStatusLine(m.renderFindBar(tab))
+		}
 		results := resultStyle.Width(m.contentWidth() - 2).Height(resultHeight - 2).Render(resultBody)
-		mainContent = lipgloss.JoinVertical(lipgloss.Left, editor, results)
+		if m.isEditorCollapsed {
+			mainContent = results
+		} else {
+			editorBody := m.renderSQLEditor(tab, max(10, m.contentWidth()-4), max(3, editorHeight-2))
+			editor := editorStyle.Width(m.contentWidth() - 2).Height(editorHeight - 2).Render(editorBody)
+			mainContent = lipgloss.JoinVertical(lipgloss.Left, editor, results)
+		}
 	} else {
 		mainContent = m.styles.panel.Width(m.contentWidth() - 2).Height(contentHeight - 2).Render(
 			m.styles.dim.Render("Select a connection and press Enter, or press a to add one."),
@@ -1628,7 +1731,7 @@ func (m *Model) renderBrowser(height int) string {
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "", m.styles.dim.Render("a add  e edit  c copy  d delete\nt test  x disconnect  r refresh"))
+	lines = append(lines, "", m.styles.dim.Render("a add  e edit  c copy  d delete\nt test  x disconnect  r refresh\ni explore schemas"))
 	return strings.Join(lines, "\n")
 }
 
@@ -1656,6 +1759,9 @@ func (m *Model) renderStatus() string {
 			prefix += " | " + current.Severity.String() + ": " + current.Message
 		}
 		status = prefix
+	}
+	if m.sessionNotice != "" {
+		status = m.sessionNotice + " | " + status
 	}
 	available := max(0, m.width-utf8.RuneCountInString(keys)-5)
 	status = truncate(status, available)
@@ -1698,13 +1804,54 @@ func (m *Model) renderPasswordPrompt() string {
 	return m.center(m.styles.modal.Render(content))
 }
 
-func (m *Model) renderResultPrompt() string {
-	title := "Find in results"
-	help := "Enter find next  Esc cancel"
-	if m.mode == modeGotoRow {
-		title = "Go to result row"
-		help = "Enter go  Esc cancel"
+// handleFindKey drives the inline, incremental find bar of the results panel.
+func (m *Model) handleFindKey(msg tea.KeyPressMsg) tea.Cmd {
+	tab := m.currentTab()
+	switch msg.String() {
+	case "esc":
+		m.resultInput.Blur()
+		m.mode = modeWorkspace
+		return nil
+	case "enter", "down":
+		if tab != nil {
+			tab.table.NextMatch(1)
+		}
+		return nil
+	case "shift+enter", "up":
+		if tab != nil {
+			tab.table.NextMatch(-1)
+		}
+		return nil
 	}
+	before := m.resultInput.Value()
+	updated, cmd := m.resultInput.Update(msg)
+	m.resultInput = updated
+	if value := m.resultInput.Value(); value != before {
+		m.resultQuery = value
+		if tab != nil {
+			tab.table.SetSearchQuery(value)
+		}
+	}
+	return cmd
+}
+
+func (m *Model) renderFindBar(tab *queryTab) string {
+	parts := []string{m.resultInput.View()}
+	if strings.TrimSpace(m.resultInput.Value()) != "" {
+		current, total := tab.table.SearchStatus()
+		if total == 0 {
+			parts = append(parts, m.styles.error.Render("no matches"))
+		} else {
+			parts = append(parts, m.styles.accent.Render(fmt.Sprintf("%d/%d", current, total)))
+		}
+	}
+	parts = append(parts, m.styles.dim.Render("Enter/↓ next  Shift+Enter/↑ prev  Esc close"))
+	return strings.Join(parts, "   ")
+}
+
+func (m *Model) renderResultPrompt() string {
+	title := "Go to result row"
+	help := "Enter go  Esc cancel"
 	content := strings.Join([]string{
 		m.styles.header.Render(title),
 		"",
@@ -1785,7 +1932,13 @@ func (m *Model) renderConfirmation() string {
 		footer = "y close  n/Esc cancel"
 	case modeConfirmQuit:
 		title = "Quit tui-db?"
-		body = "Open query editors are session-only and will be discarded."
+		body = "Open query editors are not being saved and will be discarded."
+		if m.hasRunningQueries() {
+			body = "A query is still running and will be cancelled."
+			if m.isSessionPersisted() {
+				body += " Open tabs are saved for the next session."
+			}
+		}
 		footer = "y quit  n/Esc cancel"
 	case modeConfirmHistoryClear:
 		title = "Clear query history?"
@@ -1802,8 +1955,10 @@ func (m *Model) renderHelp() string {
 Workspace
   Tab / Shift+Tab       cycle focus
   Ctrl+B                toggle schema browser
+  Ctrl+O                collapse/restore SQL editor (expand results)
   Ctrl+T                new query tab for selected connection
   Ctrl+W                close current query tab
+  Ctrl+R                attach tab without connection to selection
   Ctrl+PgUp / PgDn      switch query tabs
 
 Query
@@ -1832,6 +1987,7 @@ Results
   v                     open vertical row inspector
   c / Shift+C           copy cell / row
   r / f / g             rerun / find / go to row
+  n / N                 next / previous find match (Esc clears)
 
 Column header
   Left / Right          select a column
@@ -1853,6 +2009,9 @@ Connections
   t / x / r             test, disconnect, refresh
 
 Application
+  Ctrl+Shift+E          schema explorer (i on a browser item)
+  f / Ctrl+F            find any schema, table, or column (explorer)
+  d                     columns / indexes / view definition (explorer)
   Ctrl+H                query history
   Ctrl+Shift+P          favorites and snippets
   Ctrl+L                activity logs
@@ -1905,10 +2064,11 @@ func (m *Model) renderLogs(msg logsLoadedMsg) {
 func (m *Model) resize() {
 	contentWidth := max(20, m.contentWidth()-4)
 	contentHeight := max(8, m.height-5)
+	editorHeight, resultHeight := m.workspacePanelHeights(contentHeight)
 	for _, tab := range m.tabs {
 		tab.editor.SetWidth(contentWidth)
-		tab.editor.SetHeight(max(5, contentHeight/2-2))
-		tab.table.SetSize(contentWidth, max(4, contentHeight-contentHeight/2-2))
+		tab.editor.SetHeight(max(5, editorHeight-2))
+		tab.table.SetSize(contentWidth, max(4, resultHeight-2))
 	}
 	m.logs.SetWidth(max(20, m.width-4))
 	m.logs.SetHeight(max(5, m.height-5))
@@ -1921,6 +2081,34 @@ func (m *Model) resize() {
 	rowWidth := min(120, max(40, m.width-10))
 	m.rowInspector.SetSize(max(20, rowWidth-6), max(3, m.height-10))
 	m.resizeColumnInspector()
+}
+
+// workspacePanelHeights splits the main area between the SQL editor and the
+// results panel, including borders. A collapsed editor gives results all rows.
+func (m *Model) workspacePanelHeights(contentHeight int) (int, int) {
+	if m.isEditorCollapsed {
+		return 0, max(4, contentHeight)
+	}
+	editorHeight := max(5, contentHeight/2)
+	return editorHeight, max(4, contentHeight-editorHeight)
+}
+
+func (m *Model) toggleEditorCollapsed() {
+	if m.currentTab() == nil {
+		m.setError(errors.New("open a query tab first"))
+		return
+	}
+	m.isEditorCollapsed = !m.isEditorCollapsed
+	if m.isEditorCollapsed && m.focus == focusEditor {
+		m.setFocus(focusResults)
+	}
+	m.resize()
+	m.isStatusError = false
+	if m.isEditorCollapsed {
+		m.statusText = "SQL editor collapsed — Ctrl+O restores it"
+	} else {
+		m.statusText = "SQL editor restored"
+	}
 }
 
 func (m *Model) contentWidth() int {
@@ -1941,7 +2129,7 @@ func (m *Model) newTabForSelection() tea.Cmd {
 		m.setError(errors.New("select a connection first"))
 		return nil
 	}
-	m.addTab(connection)
+	m.addTab(connection, defaultSQL(connection.Driver))
 	return m.prepareConnectionCmd(connection)
 }
 
@@ -1953,15 +2141,15 @@ func (m *Model) ensureTab(connection profile.Connection) {
 			return
 		}
 	}
-	m.addTab(connection)
+	m.addTab(connection, defaultSQL(connection.Driver))
 }
 
-func (m *Model) addTab(connection profile.Connection) {
+func (m *Model) addTab(connection profile.Connection, text string) {
 	editor := textarea.New()
 	editor.Placeholder = "Write SQL here…"
 	editor.ShowLineNumbers = true
 	editor.SetVirtualCursor(true)
-	editor.SetValue(defaultSQL(connection.Driver))
+	editor.SetValue(text)
 	document := sqleditor.NewDocument(editor.Value())
 	analysis := sqleditor.Analyze(editor.Value(), dialectFor(connection.Driver), document.Version())
 	_ = document.Apply(analysis)
@@ -2028,6 +2216,9 @@ func (m *Model) cycleFocus(delta int) {
 	if m.isBrowserOpen {
 		order = []focus{focusBrowser, focusEditor, focusResults}
 	}
+	if m.isEditorCollapsed {
+		order = slices.DeleteFunc(order, func(item focus) bool { return item == focusEditor })
+	}
 	index := 0
 	for i, item := range order {
 		if item == m.focus {
@@ -2040,6 +2231,10 @@ func (m *Model) cycleFocus(delta int) {
 }
 
 func (m *Model) setFocus(next focus) {
+	if next == focusEditor && m.isEditorCollapsed {
+		m.isEditorCollapsed = false
+		m.resize()
+	}
 	if next != focusEditor {
 		if tab := m.currentTab(); tab != nil {
 			m.closeAutocomplete(tab, false)
@@ -2107,6 +2302,7 @@ func (m *Model) ensureCatalog(id string) *catalogState {
 	state := &catalogState{
 		schemas: []string{}, expanded: map[string]bool{},
 		relations: map[string][]database.Relation{}, columns: map[string][]database.Column{},
+		details: map[string]database.RelationDetails{},
 	}
 	m.catalog[id] = state
 	return state

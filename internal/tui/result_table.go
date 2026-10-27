@@ -91,6 +91,8 @@ type resultTableModel struct {
 	focused           bool
 	startedAt         time.Time
 	layoutTime        time.Duration
+	search            resultSearch
+	statusLine        string
 
 	headerStyle       lipgloss.Style
 	activeHeaderStyle lipgloss.Style
@@ -99,6 +101,9 @@ type resultTableModel struct {
 	dimStyle          lipgloss.Style
 	errorStyle        lipgloss.Style
 	nullStyle         lipgloss.Style
+	matchStyle        lipgloss.Style
+	matchCellStyle    lipgloss.Style
+	currentMatchStyle lipgloss.Style
 }
 
 func newResultTable(maximumColumnWidth int) *resultTableModel {
@@ -113,6 +118,9 @@ func newResultTable(maximumColumnWidth int) *resultTableModel {
 		dimStyle:          lipgloss.NewStyle().Foreground(lipgloss.Color("242")),
 		errorStyle:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203")),
 		nullStyle:         lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("214")),
+		matchStyle:        lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(lipgloss.Color("220")),
+		matchCellStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("58")),
+		currentMatchStyle: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(lipgloss.Color("208")),
 	}
 }
 
@@ -136,6 +144,7 @@ func (table *resultTableModel) SetRunning(startedAt time.Time) {
 	table.state = resultRunning
 	table.startedAt = startedAt
 	table.error = database.ErrorDetails{}
+	table.ClearSearch()
 }
 
 func (table *resultTableModel) SetResult(result database.Result) {
@@ -151,6 +160,7 @@ func (table *resultTableModel) SetResultWithLayout(
 ) {
 	preserveFrozenColumns := sameResultColumns(table.result.Columns, result.Columns)
 	table.result = result
+	table.ClearSearch()
 	table.error = database.ErrorDetails{}
 	table.state = resultReady
 	if len(result.Columns) == 0 || len(result.Rows) == 0 {
@@ -187,6 +197,7 @@ func (table *resultTableModel) SetErrorWithLayout(
 ) {
 	table.result = result
 	table.error = details
+	table.ClearSearch()
 	if details.Cancelled {
 		table.state = resultCancelled
 	} else {
@@ -283,28 +294,11 @@ func (table *resultTableModel) ClearFrozenColumns() bool {
 	return true
 }
 
+// Search moves to the next cell after the active one that contains query.
 func (table *resultTableModel) Search(query string) bool {
-	query = strings.ToLower(strings.TrimSpace(query))
-	rowCount, columnCount := len(table.result.Rows), len(table.result.Columns)
-	if query == "" || rowCount == 0 || columnCount == 0 {
-		return false
-	}
-	total := rowCount * columnCount
-	start := table.cursorRow*columnCount + table.cursorColumn
-	for step := 1; step <= total; step++ {
-		position := (start + step) % total
-		row, column := position/columnCount, position%columnCount
-		if column >= len(table.result.Rows[row]) {
-			continue
-		}
-		cell := formatResultValue(table.result.Rows[row][column], table.result.Columns[column])
-		if strings.Contains(strings.ToLower(cell.detail), query) {
-			table.cursorRow, table.cursorColumn = row, column
-			table.ensureSelectionVisible()
-			return true
-		}
-	}
-	return false
+	table.computeMatches(query)
+	_, total := table.NextMatch(1)
+	return total > 0
 }
 
 func (table *resultTableModel) GoToRow(row int) bool {
@@ -371,6 +365,13 @@ func (table *resultTableModel) RowClipboard() (string, bool) {
 	return strings.TrimSuffix(output.String(), "\n"), writer.Error() == nil
 }
 
+// ViewWithStatusLine renders the grid with line in place of the shortcuts row.
+func (table *resultTableModel) ViewWithStatusLine(line string) string {
+	table.statusLine = line
+	defer func() { table.statusLine = "" }()
+	return table.View()
+}
+
 func (table *resultTableModel) View() string {
 	switch table.state {
 	case resultRunning:
@@ -407,7 +408,9 @@ func (table *resultTableModel) renderGrid() string {
 	if table.showCellDetail() {
 		lines = append(lines, table.renderCellDetail())
 	}
-	if table.showShortcuts() {
+	if table.statusLine != "" {
+		lines = append(lines, ansi.Truncate(table.statusLine, table.width, "…"))
+	} else if table.showShortcuts() {
 		lines = append(lines, table.renderShortcuts())
 	}
 	lines = append(lines, strings.Split(table.renderFooter(), "\n")...)
@@ -449,10 +452,22 @@ func (table *resultTableModel) renderRow(row int, layout resultColumnLayout) str
 		}
 		width := visible.width
 		isActiveCell := table.focused && !table.IsColumnSelected() && row == table.cursorRow && column == table.cursorColumn
+		isActiveRow := row == table.cursorRow && !table.IsColumnSelected()
+		isMatch := table.isMatch(row, column)
 		value := fitCell(cell.display, width, cell.alignment)
 		if isActiveCell && width >= 2 {
 			value = "[" + fitCell(cell.display, width-2, cell.alignment) + "]"
-			value = table.activeCellStyle.Render(value)
+			if isMatch {
+				value = table.currentMatchStyle.Render(value)
+			} else {
+				value = table.activeCellStyle.Render(value)
+			}
+		} else if isMatch {
+			base := lipgloss.NewStyle()
+			if isActiveRow {
+				base = table.activeRowStyle
+			}
+			value = table.highlightMatch(value, base)
 		} else if cell.isNull {
 			value = table.nullStyle.Render(value)
 		} else if row == table.cursorRow && !table.IsColumnSelected() {
@@ -531,6 +546,9 @@ func (table *resultTableModel) renderCellDetail() string {
 
 func (table *resultTableModel) renderShortcuts() string {
 	shortcuts := "Arrows/WASD move  Enter detail  v row  c cell  C row  f find  g row  ? help"
+	if table.HasSearch() {
+		shortcuts = "n/N next/prev match  f edit find  Esc clear find  Arrows/WASD move  Enter detail  ? help"
+	}
 	if table.IsColumnSelected() {
 		shortcuts = "←/→ column  Enter inspect  Space freeze  u unfreeze  ↓ rows  ? help"
 	}
@@ -583,6 +601,10 @@ func (table *resultTableModel) renderFooter() string {
 	}
 	if layout.scrollEnd > layout.scrollStart {
 		position = append(position, fmt.Sprintf("Cols: %d–%d", layout.scrollStart+1, layout.scrollEnd))
+	}
+	if table.HasSearch() {
+		current, total := table.SearchStatus()
+		position = append([]string{fmt.Sprintf("Match: %d/%d", current, total)}, position...)
 	}
 	return ansi.Truncate(strings.Join(execution, " | "), table.width, "…") + "\n" +
 		ansi.Truncate(strings.Join(position, " | "), table.width, "…")
@@ -854,7 +876,7 @@ func sameResultColumns(left, right []database.ResultColumn) bool {
 
 func (table *resultTableModel) bodyHeight() int {
 	overhead := 3 // fixed header and two-line footer
-	if table.showShortcuts() {
+	if table.showShortcuts() || table.statusLine != "" {
 		overhead++
 	}
 	if table.showColumnDetail() {

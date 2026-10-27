@@ -237,3 +237,27 @@ func semanticTokens(sql string, dialect Dialect) []string {
 	}
 	return result
 }
+
+func TestQuoteIdentifier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		dialect Dialect
+		name    string
+		want    string
+	}{
+		{PostgreSQL(), "orders", "orders"},
+		{PostgreSQL(), "Orders", `"Orders"`},
+		{PostgreSQL(), "order items", `"order items"`},
+		{PostgreSQL(), "select", `"select"`},
+		{TSQL(), "Orders", "Orders"},
+		{TSQL(), "order]s", "[order]]s]"},
+		{SQLite(), "1st", `"1st"`},
+		{SQLite(), `we"ird`, `"we""ird"`},
+	}
+	for _, test := range tests {
+		if got := QuoteIdentifier(test.dialect, test.name); got != test.want {
+			t.Errorf("QuoteIdentifier(%s, %q) = %q, want %q", test.dialect.ID(), test.name, got, test.want)
+		}
+	}
+}

@@ -10,6 +10,7 @@
 - OS keyring integration, with an in-memory fallback when a keyring is unavailable
 - Browsable schemas, tables, views, and columns
 - Multiple query tabs with per-tab cancellation
+- Open tabs, editor text, and cursor restored on the next start
 - Persistent, searchable query history with status, duration, row count, filters, and rerun/open actions
 - Named SQL favorites with descriptions, optional connection binding, and tags
 - Built-in and custom SQL snippets with navigable `${placeholder}` fields
@@ -90,6 +91,8 @@ After installation, use `charta --help` for all flags and `charta version` for b
 
 Query history retains the newest 1000 executions by default. Change the local retention limit with `--history-limit N` (from 1 to 100000).
 
+Open editor tabs are restored on the next start. Use `--no-session` to neither read nor write the session file.
+
 ## First connection
 
 Press `a` in the connection browser, select the database engine with `Ctrl+D`, complete the form, and save with `Ctrl+S`. Passwords are requested when needed and are never written to the connection profile JSON.
@@ -103,14 +106,17 @@ Network connections default to certificate and hostname verification. For develo
 | Area | Key | Action |
 | --- | --- | --- |
 | Global | `F1` | Open help |
-| Global | `Ctrl+Q` | Quit, with confirmation for open editors |
+| Global | `Ctrl+Q` | Quit; confirms only while a query runs (or when tabs are not being saved) |
 | Global | `Ctrl+L` | Open activity logs |
 | Global | `Ctrl+H` | Open persistent query history |
 | Global | `Ctrl+Shift+P` | Open favorites and snippets |
+| Global | `Ctrl+Shift+E` | Open the schema explorer (`i` on a browser item opens it there) |
 | Workspace | `Tab` / `Shift+Tab` | Cycle browser, editor, and results focus |
 | Workspace | `Ctrl+B` | Toggle the connection browser |
+| Workspace | `Ctrl+O` | Collapse or restore the SQL editor so results use the full height |
 | Tabs | `Ctrl+T` | Open a query tab for the selected connection |
 | Tabs | `Ctrl+W` | Close the active tab |
+| Tabs | `Ctrl+R` | Attach a restored tab without connection to the selected connection |
 | Tabs | `Ctrl+PgUp` / `Ctrl+PgDn` | Switch tabs |
 | Query | `Ctrl+Enter` | Run the marked selection or statement at the cursor |
 | Query | `Ctrl+S` | Save the current query as a favorite |
@@ -133,7 +139,9 @@ Network connections default to certificate and hostname verification. For develo
 | Results | `Enter` | Open the complete cell value |
 | Results | `v` | Open the selected row vertically; closing it restores the same table row, column, and scroll position |
 | Results | `c` / `Shift+C` | Copy the active cell or row |
-| Results | `r` / `f` / `g` | Rerun, find a value, or go to a row |
+| Results | `r` / `f` / `g` | Rerun, live find (results stay visible while typing), or go to a row |
+| Results | `Enter` / `Shift+Enter` in find | Next or previous match; `Esc` closes the find bar and keeps highlights |
+| Results | `n` / `N` | Next or previous find match; `Esc` clears the find |
 | Results | `Up` from the first row | Select the column header |
 | Column header | `Left` / `Right` | Select a result column |
 | Column header | `Enter` | Open the Column Inspector |
@@ -159,6 +167,25 @@ Network connections default to certificate and hostname verification. For develo
 | Browser | `t` / `x` / `r` | Test, disconnect, or refresh a connection |
 
 Exact column statistics are opt-in because `COUNT(DISTINCT ...)` may scan the source relation. Results are cached briefly per connection and invalidated after database changes or connection/catalog refreshes. The inspector always shows low-cost statistics from the rows already loaded in the result table before an exact scan is requested.
+
+### Schema explorer
+
+`Ctrl+Shift+E` opens a full-screen explorer for the active tab's connection; `i` on a connection, schema, table, or column in the browser opens it positioned on that item. It shows three panes — schemas, tables and views (`T`/`V`, with column counts once loaded), and a column grid with ordinal, type (including length or precision), nullability, PK/FK key, and default — plus a detail line with the selected item's full metadata, such as the foreign-key target. On terminals narrower than 100 columns, two panes are shown and slide with the focus.
+
+| Key | Action |
+| --- | --- |
+| `←` / `→`, `Tab` | Move between panes; `Enter` drills into the next one |
+| `↑` / `↓`, `PgUp` / `PgDn`, `Home` / `End` | Move within the pane |
+| `f` / `Ctrl+F` | Find any schema, table, view, or column across the database as you type; `Tab` cycles the kind filter, `Enter` jumps to the hit |
+| `/` | Filter the focused pane as you type; `Esc` clears it |
+| `Space` | Mark columns |
+| `s` | Insert a row-limited `SELECT` for the table (or the marked/selected columns) into the connection's tab, after any existing draft |
+| `y` / `Y` | Copy the qualified name / the comma-separated column list |
+| `Enter` / `c` on a column | Open the column inspector with exact statistics (`s`); `Esc` returns to the explorer |
+| `d` | Switch the third pane between columns, indexes, and the view definition (SQL-highlighted) |
+| `r` | Reload the focused level from the database |
+
+For the selected table, the explorer also loads its indexes and, where the database exposes them cheaply, an approximate row count and total size (PostgreSQL statistics, SQL Server partition stats; SQLite has no estimate). Columns that lead an index are marked `IX`. The find searches in memory: it uses the metadata already loaded plus the full catalog shared with autocomplete, which it starts loading in the background when needed (the header shows `catalog: indexing…` until it completes). Metadata is loaded lazily as the cursor moves and shared with the browser and autocomplete caches. Opening the explorer never prompts for a password: without a stored password it shows "Password required" and connects only after `Enter`.
 
 ### Query history
 
@@ -224,15 +251,26 @@ The default paths follow the operating system's config and cache directories:
 - Profiles: `<config>/tui-db/connections.json`
 - Query history: `<config>/tui-db/query-history.json`
 - Favorites and custom snippets: `<config>/tui-db/sql-library.json`
+- Editor session: `<config>/tui-db/workspace.json` (plus `workspace.json.lock`)
 - Activity log: `<cache>/tui-db/activity.jsonl`
 
 Profile files are created with owner-only permissions and updated atomically. Passwords are stored under the `tui-db` keyring service or retained only in memory when persistence is unavailable. Query errors and activity fields are redacted before display or storage. The log rotates at 1 MiB and retains five backups.
 
 History and SQL-library files are also owner-only and atomically replaced. History SQL is sanitized for common password, token, API-key, and credential-URL forms before it reaches disk; result data and connection credentials are never stored there. Favorites and snippets remain independent from history retention and clearing.
 
+The editor session stores, per tab, the connection profile ID, the raw editor text, the cursor, and the selection anchor, plus the tab order and the active tab. It never stores results, credentials, connection details, or "trust writes" decisions. SQL is kept exactly as typed, without redaction, so a draft is never altered; treat the file like your SQL drafts. It is owner-only and atomically replaced: about two seconds after typing stops, immediately when tabs are opened, closed, or switched, and once more on quit. A session holds at most 50 tabs and 1 MiB of SQL per tab; anything beyond that is dropped or truncated with a status-bar warning. Restoring a session never connects or asks for passwords: the connection opens on the first run or the first catalog lookup. Tabs whose profile no longer exists open as "no connection" with their text intact; select a connection and press `Ctrl+R` to attach them.
+
+Only the first running instance owns the session (an advisory lock on `workspace.json.lock`); later instances restore the tabs but do not save them, and say so in the status bar. An unreadable session file or one with an unknown version is preserved as `workspace.json.corrupt-<timestamp>` and the application starts with no tabs. `--no-session` disables both reading and writing.
+
 The built-in snippet triggers are `sel`, `cte`, `join`, `insert`, `update`, `delete`, `case`, `exists`, and `group`. Type a trigger at the cursor and press `Tab`; type over the active placeholder, then use `Tab` or `Shift+Tab` to move through the remaining placeholders. In the library screen, use `a` to add a custom snippet and `e` or `Delete` to edit or remove one.
 
 The SQL safety check is deliberately conservative, but it is not a database permission boundary. Use least-privilege database accounts for real protection.
+
+## Known limitations
+
+- The session restores editor tabs only: results, open connections, running queries, and per-tab write trust are not restored.
+- Only the first instance saves the session; tabs edited in additional concurrent instances are lost on quit.
+- A cursor move without a text edit is saved on the next tab change or on quit, not after the debounce.
 
 ## Development
 

@@ -16,6 +16,7 @@ import (
 	"github.com/lucasfguimares/tui-db/internal/queryhistory"
 	"github.com/lucasfguimares/tui-db/internal/querylibrary"
 	"github.com/lucasfguimares/tui-db/internal/tui"
+	"github.com/lucasfguimares/tui-db/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -30,6 +31,7 @@ type options struct {
 	logLevel     string
 	noKeyring    bool
 	historyLimit int
+	noSession    bool
 }
 
 // NewCommand builds a fresh Cobra tree so command tests remain isolated.
@@ -50,6 +52,7 @@ func NewCommand() *cobra.Command {
 	root.Flags().StringVar(&options.logLevel, "log-level", "info", "activity log level (debug, info, warn, error)")
 	root.Flags().BoolVar(&options.noKeyring, "no-keyring", false, "keep passwords in memory for this session only")
 	root.Flags().IntVar(&options.historyLimit, "history-limit", queryhistory.DefaultLimit, "maximum retained query history entries")
+	root.Flags().BoolVar(&options.noSession, "no-session", false, "do not restore or save editor tabs")
 	root.AddCommand(newVersionCommand())
 	return root
 }
@@ -83,13 +86,20 @@ func run(ctx context.Context, options options) error {
 	if options.historyLimit < 1 || options.historyLimit > queryhistory.MaxLimit {
 		return fmt.Errorf("history limit must be between 1 and %d", queryhistory.MaxLimit)
 	}
-	configPath, logPath, historyPath, libraryPath, err := resolvePaths(options.configPath)
+	configPath, logPath, historyPath, libraryPath, workspacePath, err := resolvePaths(options.configPath)
 	if err != nil {
 		return err
 	}
 	activityLog, err := activity.Open(logPath, level)
 	if err != nil {
 		return err
+	}
+	var workspaceStore *workspace.Store
+	if !options.noSession {
+		workspaceStore, err = workspace.Open(workspacePath)
+		if err != nil {
+			return errors.Join(err, activityLog.Close())
+		}
 	}
 
 	var secrets profile.SecretStore = profile.NewMemoryStore()
@@ -102,7 +112,7 @@ func run(ctx context.Context, options options) error {
 	runner := database.NewRunner(manager)
 	historyStore := queryhistory.NewStore(historyPath, options.historyLimit)
 	libraryStore := querylibrary.NewStore(libraryPath)
-	model := tui.New(store, secrets, manager, inspector, runner, activityLog, historyStore, libraryStore)
+	model := tui.New(store, secrets, manager, inspector, runner, activityLog, historyStore, libraryStore, workspaceStore)
 
 	activityLog.Record(ctx, activity.Event{Level: slog.LevelInfo, Message: "application started"})
 	program := tea.NewProgram(
@@ -115,27 +125,31 @@ func run(ctx context.Context, options options) error {
 		Level: slog.LevelInfo, Message: "application stopped", Error: runErr,
 	})
 	closeErr := errors.Join(manager.Close(), activityLog.Close())
+	if workspaceStore != nil {
+		closeErr = errors.Join(closeErr, workspaceStore.Close())
+	}
 	if runErr != nil {
 		return fmt.Errorf("running tui: %w", runErr)
 	}
 	return closeErr
 }
 
-func resolvePaths(configPath string) (string, string, string, string, error) {
+func resolvePaths(configPath string) (string, string, string, string, string, error) {
 	if configPath == "" {
 		configDir, err := os.UserConfigDir()
 		if err != nil {
-			return "", "", "", "", fmt.Errorf("finding user config directory: %w", err)
+			return "", "", "", "", "", fmt.Errorf("finding user config directory: %w", err)
 		}
 		configPath = filepath.Join(configDir, "tui-db", "connections.json")
 	}
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("finding user cache directory: %w", err)
+		return "", "", "", "", "", fmt.Errorf("finding user cache directory: %w", err)
 	}
 	configDir := filepath.Dir(configPath)
 	return configPath,
 		filepath.Join(cacheDir, "tui-db", "activity.jsonl"),
 		filepath.Join(configDir, "query-history.json"),
-		filepath.Join(configDir, "sql-library.json"), nil
+		filepath.Join(configDir, "sql-library.json"),
+		filepath.Join(configDir, "workspace.json"), nil
 }

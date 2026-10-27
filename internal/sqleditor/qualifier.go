@@ -191,3 +191,36 @@ func normalizedIdentifier(value string) string {
 	}
 	return value
 }
+
+// QuoteIdentifier returns name ready to embed in SQL for dialect, quoting it
+// only when it is not a plain identifier or collides with a keyword.
+func QuoteIdentifier(dialect Dialect, name string) string {
+	if isPlainIdentifier(dialect, name) {
+		return name
+	}
+	return quoteSchema(dialect, name)
+}
+
+func isPlainIdentifier(dialect Dialect, name string) bool {
+	if name == "" || dialect != nil && dialect.IsKeyword(name) {
+		return false
+	}
+	// PostgreSQL folds unquoted names to lowercase, so mixed case needs quotes.
+	foldsCase := dialect != nil && dialect.ID() == "postgres"
+	for index, r := range name {
+		switch {
+		case r == '_', r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+			if foldsCase {
+				return false
+			}
+		case r >= '0' && r <= '9':
+			if index == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}

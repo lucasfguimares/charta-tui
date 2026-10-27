@@ -652,3 +652,69 @@ func TestInvalidatesSchemaMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestCollapseEditorExpandsResults(t *testing.T) {
+	t.Parallel()
+
+	model := New(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	model.width, model.height = 120, 40
+	model.addTab(profile.Connection{ID: "pg", Name: "Primary", Driver: profile.DriverPostgres}, "SELECT 1;")
+	tab := model.tabs[0]
+	expandedHeight := tab.table.height
+
+	model.handleKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if !model.isEditorCollapsed || model.focus != focusResults {
+		t.Fatalf("collapsed = %v, focus = %v", model.isEditorCollapsed, model.focus)
+	}
+	if tab.table.height <= expandedHeight {
+		t.Fatalf("result height = %d, want more than %d", tab.table.height, expandedHeight)
+	}
+	if view := ansi.Strip(model.renderWorkspace()); strings.Contains(view, "SELECT 1;") {
+		t.Fatal("collapsed workspace still renders the SQL editor")
+	}
+	model.cycleFocus(1)
+	if model.focus == focusEditor {
+		t.Fatal("focus cycled into the collapsed editor")
+	}
+
+	model.setFocus(focusEditor)
+	if model.isEditorCollapsed || tab.table.height != expandedHeight {
+		t.Fatalf("collapsed = %v, result height = %d, want %d", model.isEditorCollapsed, tab.table.height, expandedHeight)
+	}
+}
+
+func TestInlineFindKeepsResultsVisible(t *testing.T) {
+	t.Parallel()
+
+	model := New(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	model.width, model.height = 120, 40
+	model.addTab(profile.Connection{ID: "pg", Name: "Primary", Driver: profile.DriverPostgres}, "SELECT 1;")
+	tab := model.tabs[0]
+	tab.table.SetResult(database.Result{
+		Columns: []database.ResultColumn{{Name: "name"}},
+		Rows:    [][]any{{"Alice"}, {"Bob"}, {"Carol"}},
+	})
+	model.setFocus(focusResults)
+
+	model.handleKey(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	model.handleKey(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	model.handleKey(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	view := ansi.Strip(model.View().Content)
+	for _, expected := range []string{"Alice", "Carol", "Find: bo", "1/1"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("find view does not contain %q:\n%s", expected, view)
+		}
+	}
+	if tab.table.cursorRow != 1 {
+		t.Fatalf("cursor row = %d, want live jump to 1", tab.table.cursorRow)
+	}
+
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if model.mode != modeWorkspace || !tab.table.HasSearch() {
+		t.Fatalf("mode = %v, search kept = %v", model.mode, tab.table.HasSearch())
+	}
+	model.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if tab.table.HasSearch() {
+		t.Fatal("second Esc did not clear the find")
+	}
+}

@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -115,5 +116,57 @@ func TestSQLiteQueryAndCatalog(t *testing.T) {
 	if statistics.TotalRows != 3 || statistics.NullCount != 0 ||
 		!statistics.HasDistinctCount || statistics.DistinctCount != 1 {
 		t.Fatalf("Statistics() = %#v", statistics)
+	}
+}
+
+func TestSQLiteRelationDetails(t *testing.T) {
+	t.Parallel()
+
+	connection, err := profile.NewConnection(profile.DriverSQLite)
+	if err != nil {
+		t.Fatalf("NewConnection() error = %v", err)
+	}
+	connection.SQLitePath = filepath.Join(t.TempDir(), "details.sqlite")
+	manager := NewManager(profile.NewMemoryStore())
+	t.Cleanup(func() { _ = manager.Close() })
+	runner := NewRunner(manager)
+	ctx := context.Background()
+	for _, statement := range []string{
+		`CREATE TABLE members (team TEXT, member TEXT, role TEXT, PRIMARY KEY (team, member))`,
+		`CREATE UNIQUE INDEX members_role ON members (role, team)`,
+		`CREATE VIEW leads AS SELECT member FROM members WHERE role = 'lead'`,
+	} {
+		if _, err := runner.Run(ctx, connection, statement); err != nil {
+			t.Fatalf("Run(%q) error = %v", statement, err)
+		}
+	}
+	inspector := NewInspector(manager)
+
+	details, err := inspector.RelationDetails(ctx, connection, "main", "members")
+	if err != nil {
+		t.Fatalf("RelationDetails(members) error = %v", err)
+	}
+	if details.HasApproximateRows || details.HasTotalBytes || details.Definition != "" {
+		t.Fatalf("table details = %+v", details)
+	}
+	byName := map[string]Index{}
+	for _, index := range details.Indexes {
+		byName[index.Name] = index
+	}
+	role := byName["members_role"]
+	if !role.IsUnique || role.IsPrimary || strings.Join(role.Columns, ",") != "role,team" {
+		t.Fatalf("members_role = %+v", role)
+	}
+	primary := byName["sqlite_autoindex_members_1"]
+	if !primary.IsPrimary || strings.Join(primary.Columns, ",") != "team,member" {
+		t.Fatalf("primary index = %+v (all: %+v)", primary, details.Indexes)
+	}
+
+	view, err := inspector.RelationDetails(ctx, connection, "main", "leads")
+	if err != nil {
+		t.Fatalf("RelationDetails(leads) error = %v", err)
+	}
+	if !strings.Contains(view.Definition, "CREATE VIEW leads") || len(view.Indexes) != 0 {
+		t.Fatalf("view details = %+v", view)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/lucasfguimares/tui-db/internal/activity"
 	"github.com/lucasfguimares/tui-db/internal/database"
+	"github.com/lucasfguimares/tui-db/internal/profile"
 )
 
 const (
@@ -63,6 +64,12 @@ type columnInspectorModel struct {
 	statisticsError     string
 	viewport            viewport.Model
 	cancelStatistics    context.CancelFunc
+	// connection is the inspected profile; empty for tests that only set tabID.
+	connection profile.Connection
+	// isCatalog marks an inspector opened from the schema explorer: it has no
+	// loaded result and returns to returnMode on Esc.
+	isCatalog  bool
+	returnMode mode
 }
 
 type columnMetadataLoadedMsg struct {
@@ -95,6 +102,8 @@ func (m *Model) openColumnInspector(tab *queryTab) tea.Cmd {
 		column:      column,
 		local:       calculateLocalColumnStatistics(tab.table.result, tab.table.cursorColumn),
 		viewport:    viewport.New(),
+		connection:  tab.connection,
+		returnMode:  modeWorkspace,
 	}
 	key := columnKeyFor(tab.connection.ID, column)
 	if cached, ok := m.columnStatisticsCache[key]; ok && time.Since(cached.loadedAt) <= columnStatisticsTTL {
@@ -136,7 +145,7 @@ func (m *Model) handleColumnInspectorKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch key {
 	case "esc":
 		m.cancelColumnStatistics()
-		m.mode = modeWorkspace
+		m.mode = m.columnInspector.returnMode
 		return nil
 	case "left":
 		return m.navigateColumnInspector(-1)
@@ -177,6 +186,9 @@ func (m *Model) navigateColumnInspector(delta int) tea.Cmd {
 }
 
 func (m *Model) navigateColumnInspectorTo(column int) tea.Cmd {
+	if m.columnInspector.isCatalog {
+		return m.navigateExplorerInspector(column)
+	}
 	tab := m.currentTab()
 	if tab == nil || len(tab.table.result.Columns) == 0 {
 		return nil
@@ -192,6 +204,15 @@ func (m *Model) navigateColumnInspectorTo(column int) tea.Cmd {
 }
 
 func (m *Model) refreshColumnInspector() tea.Cmd {
+	if m.columnInspector.isCatalog {
+		delete(m.columnStatisticsCache, columnKeyFor(m.columnInspector.connection.ID, m.columnInspector.column))
+		hadExact := m.columnInspector.exact != nil
+		cmd := m.openExplorerInspector()
+		if hadExact {
+			return tea.Batch(cmd, m.loadColumnStatistics(true))
+		}
+		return cmd
+	}
 	tab := m.currentTab()
 	if tab == nil {
 		return nil
@@ -209,11 +230,11 @@ func (m *Model) refreshColumnInspector() tea.Cmd {
 }
 
 func (m *Model) loadColumnStatistics(force bool) tea.Cmd {
-	tab := m.currentTab()
-	if tab == nil || m.inspector == nil {
+	connection, ok := m.inspectorConnection()
+	if !ok || m.inspector == nil {
 		return nil
 	}
-	key := columnKeyFor(tab.connection.ID, m.columnInspector.column)
+	key := columnKeyFor(connection.ID, m.columnInspector.column)
 	if !key.hasSource() {
 		m.columnInspector.statisticsError = "Exact statistics require a proven source table and column"
 		m.refreshColumnInspectorContent()
@@ -230,7 +251,7 @@ func (m *Model) loadColumnStatistics(force bool) tea.Cmd {
 		}
 	}
 	m.cancelColumnStatistics()
-	timeout := time.Duration(tab.connection.QueryTimeoutSeconds) * time.Second
+	timeout := time.Duration(connection.QueryTimeoutSeconds) * time.Second
 	if timeout <= 0 || timeout > maximumStatisticsTimeout {
 		timeout = maximumStatisticsTimeout
 	}
@@ -239,8 +260,8 @@ func (m *Model) loadColumnStatistics(force bool) tea.Cmd {
 	m.columnInspector.isStatisticsLoading = true
 	m.columnInspector.statisticsError = ""
 	m.refreshColumnInspectorContent()
-	tabID, requestID := tab.id, m.columnInspector.requestID
-	connection, column := tab.connection, m.columnInspector.column
+	tabID, requestID := m.columnInspector.tabID, m.columnInspector.requestID
+	column := m.columnInspector.column
 	return func() tea.Msg {
 		statistics, err := m.inspector.Statistics(ctx, connection, column)
 		cancel()
@@ -265,7 +286,7 @@ func (m *Model) loadColumnMetadataCmd(tab *queryTab, key columnCacheKey, request
 func (m *Model) handleColumnMetadataLoaded(msg columnMetadataLoadedMsg) tea.Cmd {
 	if m.mode != modeColumnInspector || m.columnInspector.tabID != msg.tabID ||
 		m.columnInspector.requestID != msg.requestID ||
-		columnKeyFor(m.connectionIDForTab(msg.tabID), m.columnInspector.column) != msg.key {
+		columnKeyFor(m.inspectorConnectionID(), m.columnInspector.column) != msg.key {
 		return nil
 	}
 	m.columnInspector.isMetadataLoading = false
@@ -287,7 +308,7 @@ func (m *Model) handleColumnMetadataLoaded(msg columnMetadataLoadedMsg) tea.Cmd 
 func (m *Model) handleColumnStatisticsLoaded(msg columnStatisticsLoadedMsg) tea.Cmd {
 	if m.mode != modeColumnInspector || m.columnInspector.tabID != msg.tabID ||
 		m.columnInspector.requestID != msg.requestID ||
-		columnKeyFor(m.connectionIDForTab(msg.tabID), m.columnInspector.column) != msg.key {
+		columnKeyFor(m.inspectorConnectionID(), m.columnInspector.column) != msg.key {
 		return nil
 	}
 	m.columnInspector.isStatisticsLoading = false
@@ -378,23 +399,8 @@ func (m *Model) refreshColumnInspectorContent() {
 		lines = append(lines, inspector.metadataError)
 	}
 
-	local := inspector.local
-	scope := fmt.Sprintf("Loaded result (%s row(s)", formatCount(local.loadedRows))
-	if local.isTruncated {
-		scope += ", truncated"
-	}
-	lines = append(lines, "", scope+")", "NULL: "+formatCount(local.nullCount), "Non-NULL: "+formatCount(local.nonNullCount))
-	if local.hasDistinctCount {
-		lines = append(lines, "Distinct: "+formatCount(local.distinctCount))
-	} else {
-		lines = append(lines, fmt.Sprintf("Distinct: not computed above %s loaded rows", formatCount(localDistinctLimit)))
-	}
-	if local.emptyStringCount > 0 {
-		lines = append(lines, "Empty strings: "+formatCount(local.emptyStringCount))
-	}
-	if local.lengthCount > 0 {
-		average := float64(local.totalLength) / float64(local.lengthCount)
-		lines = append(lines, fmt.Sprintf("Value length: min %d  max %d  avg %.1f", local.minimumLength, local.maximumLength, average))
+	if !inspector.isCatalog {
+		lines = append(lines, localStatisticsLines(inspector.local)...)
 	}
 
 	lines = append(lines, "", "Exact source statistics")
@@ -421,6 +427,27 @@ func (m *Model) refreshColumnInspectorContent() {
 		lines = append(lines, "Press s to scan the source relation (may be expensive).")
 	}
 	inspector.viewport.SetContent(strings.Join(lines, "\n"))
+}
+
+func localStatisticsLines(local localColumnStatistics) []string {
+	scope := fmt.Sprintf("Loaded result (%s row(s)", formatCount(local.loadedRows))
+	if local.isTruncated {
+		scope += ", truncated"
+	}
+	lines := []string{"", scope + ")", "NULL: " + formatCount(local.nullCount), "Non-NULL: " + formatCount(local.nonNullCount)}
+	if local.hasDistinctCount {
+		lines = append(lines, "Distinct: "+formatCount(local.distinctCount))
+	} else {
+		lines = append(lines, fmt.Sprintf("Distinct: not computed above %s loaded rows", formatCount(localDistinctLimit)))
+	}
+	if local.emptyStringCount > 0 {
+		lines = append(lines, "Empty strings: "+formatCount(local.emptyStringCount))
+	}
+	if local.lengthCount > 0 {
+		average := float64(local.totalLength) / float64(local.lengthCount)
+		lines = append(lines, fmt.Sprintf("Value length: min %d  max %d  avg %.1f", local.minimumLength, local.maximumLength, average))
+	}
+	return lines
 }
 
 func calculateLocalColumnStatistics(result database.Result, column int) localColumnStatistics {
@@ -589,14 +616,27 @@ func (m *Model) invalidateColumnCaches(connectionID string) {
 	}
 }
 
-func (m *Model) connectionIDForTab(tabID int) string {
-	if tab := m.tabByID(tabID); tab != nil {
-		return tab.connection.ID
+// inspectorConnection returns the inspected profile, falling back to the tab
+// that opened the inspector.
+func (m *Model) inspectorConnection() (profile.Connection, bool) {
+	if m.columnInspector.connection.ID != "" {
+		return m.columnInspector.connection, true
 	}
-	return ""
+	if tab := m.tabByID(m.columnInspector.tabID); tab != nil {
+		return tab.connection, true
+	}
+	return profile.Connection{}, false
+}
+
+func (m *Model) inspectorConnectionID() string {
+	connection, _ := m.inspectorConnection()
+	return connection.ID
 }
 
 func (m *Model) columnCountForInspector() int {
+	if m.columnInspector.isCatalog {
+		return len(m.explorerColumns())
+	}
 	if tab := m.tabByID(m.columnInspector.tabID); tab != nil {
 		return len(tab.table.result.Columns)
 	}

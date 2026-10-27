@@ -493,3 +493,63 @@ func BenchmarkResultTableViewLargeDataset(b *testing.B) {
 		_ = table.View()
 	}
 }
+
+func TestResultTableIncrementalSearch(t *testing.T) {
+	t.Parallel()
+
+	table := newResultTable(20)
+	table.SetSize(60, 10)
+	table.SetResult(database.Result{
+		Columns: []database.ResultColumn{{Name: "id"}, {Name: "name"}},
+		Rows:    [][]any{{int64(1), "Alice"}, {int64(2), "Bob"}, {int64(3), "Bobby"}},
+	})
+	table.cursorRow, table.cursorColumn = 1, 0
+	table.BeginSearch()
+
+	if current, total := table.SetSearchQuery("BOB"); current != 1 || total != 2 || table.cursorRow != 1 || table.cursorColumn != 1 {
+		t.Fatalf("SetSearchQuery() = %d/%d at %d,%d", current, total, table.cursorRow, table.cursorColumn)
+	}
+	if current, _ := table.NextMatch(1); current != 2 || table.cursorRow != 2 {
+		t.Fatalf("NextMatch(1) = %d at row %d", current, table.cursorRow)
+	}
+	if current, _ := table.NextMatch(1); current != 1 || table.cursorRow != 1 {
+		t.Fatalf("NextMatch(1) did not wrap: %d at row %d", current, table.cursorRow)
+	}
+	if current, _ := table.NextMatch(-1); current != 2 || table.cursorRow != 2 {
+		t.Fatalf("NextMatch(-1) did not wrap: %d at row %d", current, table.cursorRow)
+	}
+	if _, total := table.SetSearchQuery("zzz"); total != 0 || table.cursorRow != 1 || table.cursorColumn != 0 {
+		t.Fatalf("no-match search did not restore anchor: total %d at %d,%d", total, table.cursorRow, table.cursorColumn)
+	}
+	table.SetSearchQuery("bob")
+	if !table.HasSearch() || !strings.Contains(table.renderFooter(), "Match: 1/2") {
+		t.Fatalf("footer = %q", table.renderFooter())
+	}
+	table.SetResult(database.Result{Columns: []database.ResultColumn{{Name: "id"}}, Rows: [][]any{{int64(9)}}})
+	if table.HasSearch() {
+		t.Fatal("new result kept the previous search")
+	}
+}
+
+func TestResultTableHighlightsMatchesWithoutChangingWidth(t *testing.T) {
+	t.Parallel()
+
+	table := newResultTable(20)
+	table.SetSize(60, 10)
+	table.SetResult(database.Result{
+		Columns: []database.ResultColumn{{Name: "name"}},
+		Rows:    [][]any{{"Alice"}, {"Bob"}},
+	})
+	layout := table.columnLayout()
+	plain := table.renderRow(1, layout)
+	table.BeginSearch()
+	table.SetSearchQuery("li")
+	highlighted := table.renderRow(0, layout)
+	if ansi.Strip(highlighted) != ansi.Strip(table.renderRow(0, layout)) || ansi.StringWidth(highlighted) != ansi.StringWidth(plain) {
+		t.Fatalf("highlighted row width changed: %q vs %q", ansi.Strip(highlighted), ansi.Strip(plain))
+	}
+	table.ClearSearch()
+	if table.renderRow(0, layout) == highlighted {
+		t.Fatal("match highlight is not visible in the rendered row")
+	}
+}
